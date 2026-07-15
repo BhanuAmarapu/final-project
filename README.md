@@ -21,15 +21,17 @@ CloudDedup Pro is a high-performance, secure cloud storage system that combines 
 
 ## 🛠️ Technology Stack
 
--   **Backend**: Python Flask
--   **Machine Learning**: Scikit-Learn (Decision Tree, TF-IDF Vectorizer), Sentence-BERT
--   **Image Analysis**: OpenAI GPT-4 Vision (Multimodal Analysis)
--   **Encryption**: AES-256 (Cryptography lib)
+-   **Backend**: Python Flask, Flask-Login, Flask-Bcrypt
+-   **Speech-to-Text**: Hugging Face ASR Pipeline (OpenAI Whisper-tiny) with CPU batching and thread tuning
+-   **Machine Learning**: Scikit-Learn (Decision Tree, TF-IDF Vectorizer), Sentence-BERT (`all-MiniLM-L6-v2`)
+-   **Image Analysis**: OpenAI GPT-4 Vision (safety moderation) & Facebook DINOv2 (`dinov2-small` semantic visual similarity)
+-   **Real-time Polling**: AJAX background status check loop (`/audio/status/<id>`)
+-   **Encryption**: AES-256 (Cryptography library)
 -   **Cloud**: AWS S3 (Boto3)
--   **Database**: MySQL
+-   **Database**: MySQL & MySQL-Wrapper (SQLite compatibility database layer)
 -   **Containerization**: Docker & Docker Compose
 -   **PDF Processing**: PyPDF2
--   **Frontend**: Bootstrap 5 + Bootstrap Icons
+-   **Frontend**: Bootstrap 5 + Bootstrap Icons + Custom dark-themed loader overlay
 
 ## 📋 Prerequisites
 
