@@ -297,4 +297,4 @@ The system features advanced pipelines for secure, optimized storage of audio an
 
 ## 🛡️ Security Note
 
-
+This project implements AES-256 convergent encryption. All uploaded standard files are encrypted locally before syncing to AWS S3. Secret keys, database credentials, and AWS tokens are securely managed via `.env` configuration. Ensure `SECRET_KEY` is randomized in production environments.
