@@ -20,31 +20,35 @@ class SimilarityService:
     def __init__(self):
         pass
 
-    def find_highest_similarity(self, new_embedding, exclude_id=None):
+    def find_highest_similarity(self, new_embedding, exclude_id=None, table_name="audio_records"):
         """
-        Compare new embedding against all stored transcript embeddings.
+        Compare new embedding against all stored transcript embeddings in target table.
         Returns:
             dict: {
                 "similarity": float (0.0 to 1.0),
                 "matched_record": dict (database row fields) or None
             }
         """
-        log_action("Similarity Calculation Started", "Comparing uploaded audio embedding against database records.")
+        log_action("Similarity Calculation Started", f"Comparing uploaded embedding against {table_name} records.")
         
         if not new_embedding:
             return {"similarity": 0.0, "matched_record": None}
- 
-        # Connect to DB and fetch all stored audio records
+        
+        # Validate table name to prevent SQL injection
+        if table_name not in ["audio_records", "video_records"]:
+            raise ValueError("Invalid target similarity table name")
+  
+        # Connect to DB and fetch all stored records
         conn = get_mysql_connection()
         try:
             if exclude_id is not None:
                 cursor = conn.execute(
-                    "SELECT id, original_filename, transcript, embedding, language, duration, s3_object_key FROM audio_records WHERE id != ?",
+                    f"SELECT id, original_filename, transcript, embedding, language, duration, s3_object_key FROM {table_name} WHERE id != ?",
                     (exclude_id,)
                 )
             else:
                 cursor = conn.execute(
-                    "SELECT id, original_filename, transcript, embedding, language, duration, s3_object_key FROM audio_records"
+                    f"SELECT id, original_filename, transcript, embedding, language, duration, s3_object_key FROM {table_name}"
                 )
             stored_records = cursor.fetchall()
         except Exception as e:
@@ -52,9 +56,9 @@ class SimilarityService:
             stored_records = []
         finally:
             conn.close()
-
+ 
         if not stored_records:
-            log_action("Highest Similarity Found", "No existing audio records to compare against.")
+            log_action("Highest Similarity Found", f"No existing {table_name} records to compare against.")
             return {"similarity": 0.0, "matched_record": None}
 
         highest_similarity = 0.0

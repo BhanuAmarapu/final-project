@@ -46,6 +46,14 @@ try:
             original_filename VARCHAR(500) NOT NULL,
             uuid_filename VARCHAR(255) UNIQUE NOT NULL,
             s3_object_key VARCHAR(1000) NOT NULL,
+            transcript LONGTEXT DEFAULT NULL,
+            embedding LONGTEXT DEFAULT NULL,
+            language VARCHAR(50) DEFAULT NULL,
+            duration FLOAT DEFAULT NULL,
+            similarity_score FLOAT DEFAULT NULL,
+            status VARCHAR(50) DEFAULT 'completed',
+            matched_file VARCHAR(500) DEFAULT NULL,
+            matched_transcript LONGTEXT DEFAULT NULL,
             upload_timestamp DATETIME DEFAULT CURRENT_TIMESTAMP,
             FOREIGN KEY (user_id) REFERENCES users(id)
         );
@@ -68,6 +76,21 @@ try:
         conn_init.execute("ALTER TABLE audio_records ADD COLUMN matched_transcript LONGTEXT DEFAULT NULL")
         conn_init.commit()
         print("[INIT] matched_file and matched_transcript columns added to audio_records table.")
+
+    # Check if 'status' column exists in video_records, if not add all similarity columns
+    cursor_cols = conn_init.execute("SHOW COLUMNS FROM video_records LIKE 'status'")
+    if not cursor_cols.fetchone():
+        print("[INIT] Video records table missing similarity columns. Migrating...")
+        conn_init.execute("ALTER TABLE video_records ADD COLUMN transcript LONGTEXT DEFAULT NULL")
+        conn_init.execute("ALTER TABLE video_records ADD COLUMN embedding LONGTEXT DEFAULT NULL")
+        conn_init.execute("ALTER TABLE video_records ADD COLUMN language VARCHAR(50) DEFAULT NULL")
+        conn_init.execute("ALTER TABLE video_records ADD COLUMN duration FLOAT DEFAULT NULL")
+        conn_init.execute("ALTER TABLE video_records ADD COLUMN similarity_score FLOAT DEFAULT NULL")
+        conn_init.execute("ALTER TABLE video_records ADD COLUMN status VARCHAR(50) DEFAULT 'completed'")
+        conn_init.execute("ALTER TABLE video_records ADD COLUMN matched_file VARCHAR(500) DEFAULT NULL")
+        conn_init.execute("ALTER TABLE video_records ADD COLUMN matched_transcript LONGTEXT DEFAULT NULL")
+        conn_init.commit()
+        print("[INIT] Similarity columns added to video_records table.")
         
     conn_init.close()
     print("[INIT] Database verification for video and audio tables complete.")
@@ -317,45 +340,178 @@ def upload_file():
                 log_action("Video Upload Started", f"File: {filename}")
                 
                 try:
-                    # Generate S3 key/uuid filename
+                    # Generate unique temp filename to prevent collision in UPLOAD_TEMP
                     import uuid
+                    unique_temp_filename = f"video_temp_{uuid.uuid4().hex}.{file_ext}"
+                    unique_temp_path = os.path.join(app.config['UPLOAD_TEMP'], unique_temp_filename)
+                    os.rename(temp_path, unique_temp_path)
+                    
+                    # Generate S3 key/uuid filename
                     s3_filename = f"video_{uuid.uuid4().hex}.{file_ext}"
                     
-                    # Upload directly to S3 first
-                    from utils import upload_to_s3
-                    if upload_to_s3(temp_path, s3_filename):
-                        # Store in video_records DB table
-                        conn = get_db_connection()
-                        conn.execute("""
-                            INSERT INTO video_records 
-                            (user_id, original_filename, uuid_filename, s3_object_key)
-                            VALUES (?, ?, ?, ?)
-                        """, (
-                            current_user.id,
-                            filename,
-                            s3_filename,
-                            s3_filename
-                        ))
-                        conn.commit()
-                        conn.close()
+                    # Store placeholder in video_records DB table immediately
+                    conn = get_db_connection()
+                    conn.execute("""
+                        INSERT INTO video_records 
+                        (user_id, original_filename, uuid_filename, s3_object_key, status, transcript, embedding)
+                        VALUES (?, ?, ?, ?, ?, ?, ?)
+                    """, (
+                        current_user.id,
+                        filename,
+                        s3_filename,
+                        s3_filename,
+                        "processing",
+                        "Processing video...",
+                        "[]"
+                    ))
+                    conn.commit()
+                    
+                    # Fetch database record ID
+                    row = conn.execute("SELECT id FROM video_records WHERE uuid_filename = ?", (s3_filename,)).fetchone()
+                    record_id = row['id'] if row else None
+                    conn.close()
+                    
+                    if not record_id:
+                        raise RuntimeError("Failed to retrieve created video record ID")
                         
-                        # Cleanup local temp file
-                        if os.path.exists(temp_path):
-                            os.remove(temp_path)
+                    # Spawn background daemon thread to run audio extraction, Whisper, SBERT, and comparison
+                    import threading
+                    
+                    def run_video_async_pipeline(rec_id, t_path, orig_name, s3_name):
+                        temp_extracted_audio = None
+                        try:
+                            # 1. Upload video directly to S3 first
+                            from utils import upload_to_s3
+                            if not upload_to_s3(t_path, s3_name):
+                                raise RuntimeError("S3 upload failed")
+                            print(f"[AsyncVideo] Uploaded {orig_name} to S3 immediately.")
                             
-                        flash(f'Video file "{filename}" uploaded and stored in AWS S3 successfully!', 'success')
-                        return jsonify({
-                            "status": "success",
-                            "message": "Video file uploaded and stored in AWS S3."
-                        })
-                    else:
-                        raise RuntimeError("AWS S3 upload returned False")
-                        
+                            # 2. Extract audio track using FFmpeg
+                            import subprocess
+                            import uuid
+                            audio_filename = f"extracted_{uuid.uuid4().hex}.mp3"
+                            temp_extracted_audio = os.path.join(app.config['UPLOAD_TEMP'], audio_filename)
+                            
+                            cmd = [
+                                "ffmpeg", "-y", "-i", t_path, 
+                                "-vn", "-acodec", "libmp3lame", "-ar", "16000", "-ac", "1", 
+                                temp_extracted_audio
+                            ]
+                            
+                            print(f"[AsyncVideo] Extracting audio track using command: {' '.join(cmd)}")
+                            process = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+                            
+                            transcript = "No audio track detected or extraction failed."
+                            language = "en"
+                            duration = 0.0
+                            embedding = []
+                            similarity_score = 0.0
+                            status = "completed"
+                            matched_filename = None
+                            matched_transcript = None
+                            
+                            # Check if audio file was successfully generated and contains actual data
+                            if process.returncode == 0 and os.path.exists(temp_extracted_audio) and os.path.getsize(temp_extracted_audio) > 1000:
+                                print(f"[AsyncVideo] Audio track successfully extracted. Running Whisper transcription...")
+                                
+                                # 3. Convert speech into text using Whisper ASR
+                                from whisper_service import whisper_service
+                                transcription_result = whisper_service.transcribe(temp_extracted_audio)
+                                transcript = transcription_result["transcript"]
+                                language = transcription_result["language"]
+                                duration = transcription_result["duration"]
+                                
+                                if transcript.strip():
+                                    # 4. Generate semantic embeddings using Sentence-BERT
+                                    from sentencebert_service import sentencebert_service
+                                    embedding = sentencebert_service.generate_embedding(transcript)
+                                    
+                                    # 5. Compare embedding against other stored video transcripts (excluding ourselves)
+                                    from similarity_service import similarity_service
+                                    similarity_result = similarity_service.find_highest_similarity(
+                                        embedding, 
+                                        exclude_id=rec_id, 
+                                        table_name="video_records"
+                                    )
+                                    similarity_score = similarity_result["similarity"]
+                                    
+                                    # If similarity is >= 60%, status is pending_confirmation, otherwise completed
+                                    status = "pending_confirmation" if similarity_score >= 0.60 else "completed"
+                                    
+                                    # Retrieve matched record
+                                    matched_record = similarity_result.get("matched_record")
+                                    matched_filename = matched_record["original_filename"] if matched_record else None
+                                    matched_transcript = matched_record["transcript"] if matched_record else None
+                                    
+                            # 6. Update database record with final values
+                            import json
+                            conn_thread = get_db_connection()
+                            conn_thread.execute("""
+                                UPDATE video_records 
+                                SET transcript = ?, embedding = ?, language = ?, duration = ?, 
+                                    similarity_score = ?, status = ?, matched_file = ?, matched_transcript = ?
+                                WHERE id = ?
+                            """, (
+                                transcript,
+                                json.dumps(embedding),
+                                language,
+                                duration,
+                                similarity_score,
+                                status,
+                                matched_filename,
+                                matched_transcript,
+                                rec_id
+                            ))
+                            conn_thread.commit()
+                            conn_thread.close()
+                            print(f"[AsyncVideo] Processed and finalized video {orig_name} successfully with status {status}.")
+                            
+                        except Exception as thread_err:
+                            print(f"[AsyncVideo] Error processing video {orig_name}: {thread_err}")
+                            try:
+                                conn_thread = get_db_connection()
+                                conn_thread.execute("""
+                                    UPDATE video_records 
+                                    SET transcript = ?, similarity_score = 0.0, status = 'failed'
+                                    WHERE id = ?
+                                """, (f"Processing failed: {str(thread_err)}", rec_id))
+                                conn_thread.commit()
+                                conn_thread.close()
+                            except Exception as db_err:
+                                print(f"[AsyncVideo] Error updating failure status: {db_err}")
+                        finally:
+                            # Cleanup local temp files
+                            if os.path.exists(t_path):
+                                try:
+                                    os.remove(t_path)
+                                except:
+                                    pass
+                            if temp_extracted_audio and os.path.exists(temp_extracted_audio):
+                                try:
+                                    os.remove(temp_extracted_audio)
+                                except:
+                                    pass
+                                    
+                    threading.Thread(
+                        target=run_video_async_pipeline,
+                        args=(record_id, unique_temp_path, filename, s3_filename),
+                        daemon=True
+                    ).start()
+                    
+                    return jsonify({
+                        "status": "processing",
+                        "video_id": record_id,
+                        "message": "Video file uploaded and is being processed in the background."
+                    })
+                    
                 except Exception as e:
-                    log_action("Upload Error", f"Error uploading video file: {str(e)}")
-                    if os.path.exists(temp_path):
-                        os.remove(temp_path)
-                    return jsonify({"error": f"Video upload failed: {str(e)}"}), 500
+                    log_action("Upload Error", f"Error in video upload pipeline: {str(e)}")
+                    if 'unique_temp_path' in locals() and os.path.exists(unique_temp_path):
+                        try:
+                            os.remove(unique_temp_path)
+                        except:
+                            pass
+                    return jsonify({"error": f"Video processing failed: {str(e)}"}), 500
 
             # STEP 0: AI CONTENT MODERATION CHECK (BEFORE ANY PROCESSING)
             print(f"\n========== CONTENT MODERATION CHECK ==========")
@@ -1163,6 +1319,53 @@ def audio_status(audio_id):
         "matched_file": audio['matched_file'],
         "matched_transcript": audio['matched_transcript']
     })
+
+@app.route('/video/status/<int:video_id>')
+@login_required
+def video_status(video_id):
+    conn = get_db_connection()
+    video = conn.execute("""
+        SELECT status, similarity_score, matched_file, matched_transcript 
+        FROM video_records 
+        WHERE id = ?
+    """, (video_id,)).fetchone()
+    conn.close()
+    
+    if not video:
+        return jsonify({"status": "not_found"}), 404
+        
+    return jsonify({
+        "status": video['status'],
+        "similarity": video['similarity_score'],
+        "matched_file": video['matched_file'],
+        "matched_transcript": video['matched_transcript']
+    })
+
+@app.route('/video/confirm_store/<int:video_id>', methods=['POST'])
+@login_required
+def confirm_store_video(video_id):
+    conn = get_db_connection()
+    video = conn.execute("SELECT * FROM video_records WHERE id = ?", (video_id,)).fetchone()
+    if not video:
+        conn.close()
+        flash('Video file not found.')
+        return redirect(url_for('dashboard'))
+        
+    if video['user_id'] != current_user.id and current_user.role != 'admin':
+        conn.close()
+        flash('Permission denied.')
+        return redirect(url_for('dashboard'))
+        
+    try:
+        conn.execute("UPDATE video_records SET status = 'completed' WHERE id = ?", (video_id,))
+        conn.commit()
+        flash(f"Video '{video['original_filename']}' successfully stored.")
+    except Exception as e:
+        flash(f"Error storing video: {e}")
+    finally:
+        conn.close()
+        
+    return redirect(url_for('dashboard'))
 
 @app.route('/video/open/<int:video_id>')
 @login_required

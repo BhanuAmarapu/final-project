@@ -98,7 +98,7 @@
                     </div>
                 </div>
                 
-                <div class="text-center fw-bold mb-2">Do you want to store this audio?</div>
+                <div class="text-center fw-bold mb-2" id="modalQuestion">Do you want to store this audio?</div>
             </div>
             <div class="modal-footer border-0 d-flex justify-content-center gap-3 pb-4">
                 <button type="button" class="btn btn-warning px-4 py-2 rounded-pill fw-bold text-dark" id="btnStoreAnyway">Store Anyway</button>
@@ -145,6 +145,8 @@ document.addEventListener('DOMContentLoaded', function() {
                 // Intercept for audio and video files
                 event.preventDefault();
                 
+                const isVideo = supportedVideo.includes(ext);
+                
                 // Dynamically update loader text
                 const loaderHeader = loader.querySelector('h3');
                 const loaderText = loader.querySelector('p');
@@ -153,8 +155,8 @@ document.addEventListener('DOMContentLoaded', function() {
                         loaderHeader.textContent = "Processing Audio with AI";
                         loaderText.textContent = "Transcribing speech using OpenAI Whisper and generating semantic embeddings. This may take a few moments...";
                     } else {
-                        loaderHeader.textContent = "Uploading Video to AWS S3";
-                        loaderText.textContent = "Uploading the video file directly to AWS S3 storage. Please wait...";
+                        loaderHeader.textContent = "Processing Video with AI";
+                        loaderText.textContent = "Extracting audio track from video, transcribing speech using OpenAI Whisper, and generating semantic embeddings. This may take a few moments...";
                     }
                 }
                 
@@ -176,10 +178,14 @@ document.addEventListener('DOMContentLoaded', function() {
                 })
                 .then(data => {
                     if (data.status === 'processing') {
-                        // Start polling for audio processing status in real-time
-                        const audioId = data.audio_id;
+                        // Start polling for media processing status in real-time
+                        const mediaId = isVideo ? data.video_id : data.audio_id;
+                        const statusUrl = isVideo ? '/video/status/' + mediaId : '/audio/status/' + mediaId;
+                        const confirmUrl = isVideo ? '/video/confirm_store/' + mediaId : '/audio/confirm_store/' + mediaId;
+                        const deleteUrl = isVideo ? '/video/delete/' + mediaId : '/audio/delete/' + mediaId;
+                        
                         const pollInterval = setInterval(function() {
-                            fetch('/audio/status/' + audioId)
+                            fetch(statusUrl)
                             .then(res => {
                                 if (!res.ok) throw new Error('Polling status request failed');
                                 return res.json();
@@ -191,6 +197,17 @@ document.addEventListener('DOMContentLoaded', function() {
                                     // Hide loader
                                     loader.classList.add('d-none');
                                     loader.classList.remove('d-flex');
+                                    
+                                    // Custom modal title and description for video vs audio
+                                    const modalTitle = document.getElementById('audioConfirmModalLabel');
+                                    const modalQuestion = document.getElementById('modalQuestion');
+                                    if (isVideo) {
+                                        modalTitle.innerHTML = '<i class="bi bi-exclamation-triangle-fill me-2"></i>Similar Video Found';
+                                        modalQuestion.textContent = 'Do you want to store this video?';
+                                    } else {
+                                        modalTitle.innerHTML = '<i class="bi bi-exclamation-triangle-fill me-2"></i>Similar Audio Found';
+                                        modalQuestion.textContent = 'Do you want to store this audio?';
+                                    }
                                     
                                     // Populate similarity modal details
                                     document.getElementById('modalSimilarity').textContent = (statusData.similarity * 100).toFixed(2) + '%';
@@ -215,7 +232,7 @@ document.addEventListener('DOMContentLoaded', function() {
                                         loader.classList.remove('d-none');
                                         loader.classList.add('d-flex');
                                         
-                                        fetch('/audio/confirm_store/' + audioId, {
+                                        fetch(confirmUrl, {
                                             method: 'POST'
                                         })
                                         .then(res => {
@@ -235,7 +252,7 @@ document.addEventListener('DOMContentLoaded', function() {
                                         loader.classList.remove('d-none');
                                         loader.classList.add('d-flex');
                                         
-                                        fetch('/audio/delete/' + audioId, {
+                                        fetch(deleteUrl, {
                                             method: 'POST'
                                         })
                                         .then(res => {
@@ -260,7 +277,7 @@ document.addEventListener('DOMContentLoaded', function() {
                                     clearInterval(pollInterval);
                                     loader.classList.add('d-none');
                                     loader.classList.remove('d-flex');
-                                    alert('AI transcription/similarity matching failed on this audio file.');
+                                    alert('AI transcription/similarity matching failed on this media file.');
                                     window.location.reload();
                                 }
                             })

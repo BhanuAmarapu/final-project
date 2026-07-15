@@ -369,8 +369,11 @@
                                 <thead>
                                     <tr>
                                         <th>Video File Info</th>
+                                        <th>Status</th>
+                                        <th>Duration</th>
                                         <th>S3 Key</th>
-                                        <th>Uploaded At</th>
+                                        <th>Highest Similarity</th>
+                                        <th>Transcript Preview</th>
                                         <th class="text-end">Actions</th>
                                     </tr>
                                 </thead>
@@ -384,36 +387,83 @@
                                                 </div>
                                                 <div class="ms-3">
                                                     <div class="fw-bold">{{ video.original_filename }}</div>
-                                                    <small class="text-muted">ID: #{{ video.id }}</small>
+                                                    <small class="text-muted">ID: #{{ video.id }} | {{ video.upload_timestamp }}</small>
                                                 </div>
                                             </div>
                                         </td>
                                         <td>
-                                            <code class="text-secondary small" title="{{ video.s3_object_key }}">{{ video.s3_object_key[:30] }}...</code>
+                                            {% if video.status == 'pending_confirmation' %}
+                                                <span class="badge bg-danger rounded-pill px-3">PENDING</span>
+                                            {% elif video.status == 'processing' %}
+                                                <span class="badge bg-warning text-dark rounded-pill px-3">PROCESSING</span>
+                                            {% else %}
+                                                <span class="badge bg-secondary rounded-pill px-3">{{ (video.language or 'en')|upper }}</span>
+                                            {% endif %}
                                         </td>
-                                        <td><span class="text-muted small">{{ video.upload_timestamp }}</span></td>
+                                        <td><span class="fw-bold">{{ (video.duration or 0.0)|round(2) }} s</span></td>
+                                        <td>
+                                            <code class="text-secondary small" title="{{ video.s3_object_key }}">{{ video.s3_object_key[:20] }}...</code>
+                                        </td>
+                                        <td>
+                                            {% if video.similarity_score is not none %}
+                                                <span class="badge {% if video.similarity_score >= 0.6 %}bg-danger text-white{% else %}bg-success{% endif %} rounded-pill px-3">
+                                                    {{ (video.similarity_score * 100)|round(2) }}%
+                                                </span>
+                                            {% else %}
+                                                <span class="badge bg-light text-muted border rounded-pill px-3">N/A</span>
+                                            {% endif %}
+                                        </td>
+                                        <td>
+                                            {% if video.status == 'pending_confirmation' %}
+                                                <div class="small text-truncate text-danger fw-bold" style="max-width: 250px;" title="Warning: Highly similar speech in another video file already exists. Please confirm store or cancel.">
+                                                    ⚠️ Similar to existing file
+                                                </div>
+                                            {% else %}
+                                                <div class="small text-truncate text-muted" style="max-width: 250px;" title="{{ video.transcript or 'No transcript available.' }}">
+                                                    {{ video.transcript or 'No transcript available.' }}
+                                                </div>
+                                            {% endif %}
+                                        </td>
                                         <td>
                                             <div class="d-flex justify-content-end gap-2">
-                                                <a href="/video/open/{{ video.id }}" class="btn btn-sm btn-outline-primary rounded-pill px-3" target="_blank">
-                                                    <i class="bi bi-play-fill me-1"></i>Open
-                                                </a>
-                                                <button class="btn btn-sm btn-outline-secondary rounded-pill px-3" onclick="renameVideo({{ video.id }}, '{{ video.original_filename|escape }}')">
-                                                    <i class="bi bi-pencil-square me-1"></i>Rename
-                                                </button>
-                                                <form action="/video/delete/{{ video.id }}" method="POST" class="d-inline" onsubmit="return confirm('Are you sure you want to delete this video file?');">
-                                                    <button type="submit" class="btn btn-sm btn-outline-danger rounded-pill px-3">
-                                                        <i class="bi bi-trash-fill me-1"></i>Delete
+                                                {% if video.status == 'pending_confirmation' %}
+                                                    <form action="/video/confirm_store/{{ video.id }}" method="POST" class="d-inline">
+                                                        <button type="submit" class="btn btn-sm btn-warning px-3 rounded-pill text-dark fw-bold">
+                                                            Store Anyway
+                                                        </button>
+                                                    </form>
+                                                    <form action="/video/delete/{{ video.id }}" method="POST" class="d-inline" onsubmit="return confirm('Are you sure you want to cancel this video upload?');">
+                                                        <button type="submit" class="btn btn-sm btn-outline-secondary px-3 rounded-pill">
+                                                            Cancel
+                                                        </button>
+                                                    </form>
+                                                {% elif video.status == 'processing' %}
+                                                    <button class="btn btn-sm btn-light border px-3 rounded-pill text-muted" disabled>
+                                                        <span class="spinner-border spinner-border-sm me-1" role="status" aria-hidden="true"></span>
+                                                        Processing...
                                                     </button>
-                                                </form>
+                                                {% else %}
+                                                    <a href="/video/open/{{ video.id }}" class="btn btn-sm btn-outline-primary rounded-pill px-3" target="_blank">
+                                                        <i class="bi bi-play-fill me-1"></i>Open
+                                                    </a>
+                                                    <button class="btn btn-sm btn-outline-secondary rounded-pill px-3" onclick="renameVideo({{ video.id }}, '{{ video.original_filename|escape }}')">
+                                                        <i class="bi bi-pencil-square me-1"></i>Rename
+                                                    </button>
+                                                    <form action="/video/delete/{{ video.id }}" method="POST" class="d-inline" onsubmit="return confirm('Are you sure you want to delete this video file?');">
+                                                        <button type="submit" class="btn btn-sm btn-outline-danger rounded-pill px-3">
+                                                            <i class="bi bi-trash-fill me-1"></i>Delete
+                                                        </button>
+                                                    </form>
+                                                {% endif %}
                                             </div>
                                         </td>
                                     </tr>
                                     {% else %}
                                     <tr>
-                                        <td colspan="4" class="text-center py-5 text-muted">
+                                        <td colspan="7" class="text-center py-5 text-muted">
                                             <i class="bi bi-play-btn-slice display-6 mb-3 d-block text-danger"></i>
                                             <div class="fw-bold mb-1">No video files uploaded yet</div>
-                                            <small class="text-muted">Upload video files (mp4, avi, mov, etc.) to store them securely in S3.</small>
+                                            <small class="text-muted">Upload video files (mp4, avi, mov, etc.) to run speech-to-text similarity intelligence.</small>
                                         </td>
                                     </tr>
                                     {% endfor %}
