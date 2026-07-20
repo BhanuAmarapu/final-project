@@ -54,6 +54,8 @@ try:
             status VARCHAR(50) DEFAULT 'completed',
             matched_file VARCHAR(500) DEFAULT NULL,
             matched_transcript LONGTEXT DEFAULT NULL,
+            file_hash VARCHAR(64) DEFAULT NULL,
+            file_size BIGINT DEFAULT 0,
             upload_timestamp DATETIME DEFAULT CURRENT_TIMESTAMP,
             FOREIGN KEY (user_id) REFERENCES users(id)
         );
@@ -77,6 +79,22 @@ try:
         conn_init.commit()
         print("[INIT] matched_file and matched_transcript columns added to audio_records table.")
 
+    # Check if 'file_hash' column exists in audio_records, if not add it
+    cursor_cols = conn_init.execute("SHOW COLUMNS FROM audio_records LIKE 'file_hash'")
+    if not cursor_cols.fetchone():
+        print("[INIT] file_hash column missing from audio_records table. Migrating...")
+        conn_init.execute("ALTER TABLE audio_records ADD COLUMN file_hash VARCHAR(64) DEFAULT NULL")
+        conn_init.commit()
+        print("[INIT] file_hash column added to audio_records table.")
+
+    # Check if 'file_size' column exists in audio_records, if not add it
+    cursor_cols = conn_init.execute("SHOW COLUMNS FROM audio_records LIKE 'file_size'")
+    if not cursor_cols.fetchone():
+        print("[INIT] file_size column missing from audio_records table. Migrating...")
+        conn_init.execute("ALTER TABLE audio_records ADD COLUMN file_size BIGINT DEFAULT 0")
+        conn_init.commit()
+        print("[INIT] file_size column added to audio_records table.")
+
     # Check if 'status' column exists in video_records, if not add all similarity columns
     cursor_cols = conn_init.execute("SHOW COLUMNS FROM video_records LIKE 'status'")
     if not cursor_cols.fetchone():
@@ -91,6 +109,22 @@ try:
         conn_init.execute("ALTER TABLE video_records ADD COLUMN matched_transcript LONGTEXT DEFAULT NULL")
         conn_init.commit()
         print("[INIT] Similarity columns added to video_records table.")
+
+    # Check if 'file_hash' column exists in video_records, if not add it
+    cursor_cols = conn_init.execute("SHOW COLUMNS FROM video_records LIKE 'file_hash'")
+    if not cursor_cols.fetchone():
+        print("[INIT] file_hash column missing from video_records table. Migrating...")
+        conn_init.execute("ALTER TABLE video_records ADD COLUMN file_hash VARCHAR(64) DEFAULT NULL")
+        conn_init.commit()
+        print("[INIT] file_hash column added to video_records table.")
+
+    # Check if 'file_size' column exists in video_records, if not add it
+    cursor_cols = conn_init.execute("SHOW COLUMNS FROM video_records LIKE 'file_size'")
+    if not cursor_cols.fetchone():
+        print("[INIT] file_size column missing from video_records table. Migrating...")
+        conn_init.execute("ALTER TABLE video_records ADD COLUMN file_size BIGINT DEFAULT 0")
+        conn_init.commit()
+        print("[INIT] file_size column added to video_records table.")
         
     conn_init.close()
     print("[INIT] Database verification for video and audio tables complete.")
@@ -196,21 +230,22 @@ def upload_file():
                     # 1. Validate the audio file
                     log_action("Audio Validation Passed", f"File: {filename}")
                     
-                    # Generate a unique temp filename to avoid collision in UPLOAD_TEMP
-                    import uuid
-                    unique_temp_filename = f"audio_temp_{uuid.uuid4().hex}.{file_ext}"
-                    unique_temp_path = os.path.join(app.config['UPLOAD_TEMP'], unique_temp_filename)
-                    os.rename(temp_path, unique_temp_path)
+                    from utils import get_file_hash
+                    file_hash = get_file_hash(temp_path)
+                    file_size = os.path.getsize(temp_path)
                     
                     # Generate S3 key/uuid filename
+                    import uuid
                     s3_filename = f"audio_{uuid.uuid4().hex}.{file_ext}"
+                    unique_temp_path = os.path.join(app.config['UPLOAD_TEMP'], s3_filename)
+                    os.rename(temp_path, unique_temp_path)
                     
                     # Store placeholder record in audio_records DB table immediately
                     conn = get_db_connection()
                     conn.execute("""
                         INSERT INTO audio_records 
-                        (user_id, original_filename, uuid_filename, transcript, embedding, language, duration, s3_object_key, similarity_score, status)
-                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        (user_id, original_filename, uuid_filename, transcript, embedding, language, duration, s3_object_key, similarity_score, status, file_hash, file_size)
+                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     """, (
                         current_user.id,
                         filename,
@@ -221,7 +256,9 @@ def upload_file():
                         0.0,
                         s3_filename,
                         None,
-                        "processing"
+                        "processing",
+                        file_hash,
+                        file_size
                     ))
                     conn.commit()
                     
@@ -238,24 +275,43 @@ def upload_file():
                     
                     def run_async_pipeline(rec_id, t_path, orig_name, s3_name):
                         try:
-                            # 1. Upload directly to S3 first so it is stored in S3 immediately!
-                            from utils import upload_to_s3
-                            if not upload_to_s3(t_path, s3_name):
-                                raise RuntimeError("S3 upload failed")
-                            print(f"[AsyncAudio] Uploaded {orig_name} to S3 immediately.")
+                            # Extract 60-second audio snippet for faster transcription and duplicate detection
+                            import subprocess
+                            import uuid
+                            snippet_filename = f"snippet_{uuid.uuid4().hex}.mp3"
+                            temp_audio_snippet = os.path.join(app.config['UPLOAD_TEMP'], snippet_filename)
                             
-                            # 2. Convert speech into text using Whisper
+                            cmd = [
+                                "ffmpeg", "-y", "-i", t_path, 
+                                "-ss", "0", "-t", "60", 
+                                "-acodec", "libmp3lame", "-ar", "16000", "-ac", "1", 
+                                temp_audio_snippet
+                            ]
+                            print(f"[AsyncAudio] Extracting 60s snippet using command: {' '.join(cmd)}")
+                            process = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+                            
+                            # Transcribe the snippet if it was successfully created, fallback to full audio if not
+                            transcribe_path = temp_audio_snippet if (process.returncode == 0 and os.path.exists(temp_audio_snippet) and os.path.getsize(temp_audio_snippet) > 1000) else t_path
+                            
+                            # 1. Convert speech into text using Whisper
                             from whisper_service import whisper_service
-                            transcription_result = whisper_service.transcribe(t_path)
+                            transcription_result = whisper_service.transcribe(transcribe_path)
                             transcript = transcription_result["transcript"]
                             language = transcription_result["language"]
                             duration = transcription_result["duration"]
                             
-                            # 3. Generate semantic embeddings using Sentence-BERT
+                            # Clean up the audio snippet immediately
+                            if os.path.exists(temp_audio_snippet):
+                                try:
+                                    os.remove(temp_audio_snippet)
+                                except:
+                                    pass
+                            
+                            # 2. Generate semantic embeddings using Sentence-BERT
                             from sentencebert_service import sentencebert_service
                             embedding = sentencebert_service.generate_embedding(transcript)
                             
-                            # 4. Compare embedding against stored transcript embeddings (excluding ourselves!)
+                            # 3. Compare embedding against stored transcript embeddings (excluding ourselves!)
                             from similarity_service import similarity_service
                             similarity_result = similarity_service.find_highest_similarity(embedding, exclude_id=rec_id)
                             similarity_score = similarity_result["similarity"]
@@ -268,6 +324,28 @@ def upload_file():
                             matched_filename = matched_record["original_filename"] if matched_record else None
                             matched_transcript = matched_record["transcript"] if matched_record else None
                             
+                            # 4. If status is completed (similarity < 60%), upload to S3 now and delete local file
+                            if status == "completed":
+                                local_storage_fallback = False
+                                if Config.USE_S3:
+                                    from utils import upload_to_s3
+                                    if not upload_to_s3(t_path, s3_name):
+                                        print("[AsyncAudio] S3 upload failed, falling back to local storage.")
+                                        local_storage_fallback = True
+                                    else:
+                                        print(f"[AsyncAudio] Uploaded {orig_name} to S3 immediately as it is unique.")
+                                        if os.path.exists(t_path):
+                                            os.remove(t_path)
+                                            
+                                if not Config.USE_S3 or local_storage_fallback:
+                                    # Fallback to local storage
+                                    stored_path = os.path.join(Config.UPLOAD_STORED, s3_name)
+                                    import shutil
+                                    shutil.copy2(t_path, stored_path)
+                                    print(f"[AsyncAudio] Stored {orig_name} locally as S3 is disabled or failed.")
+                                    if os.path.exists(t_path):
+                                        os.remove(t_path)
+                                    
                             # 5. Update database record with final values
                             import json
                             conn_thread = get_db_connection()
@@ -304,13 +382,11 @@ def upload_file():
                                 conn_thread.close()
                             except Exception as db_err:
                                 print(f"[AsyncAudio] Error updating failure status: {db_err}")
-                        finally:
-                            # Cleanup local temp file
                             if os.path.exists(t_path):
                                 try:
                                     os.remove(t_path)
-                                except Exception as clean_err:
-                                    print(f"[AsyncAudio] Error deleting temp file: {clean_err}")
+                                except:
+                                    pass
                                     
                     threading.Thread(
                         target=run_async_pipeline,
@@ -326,7 +402,6 @@ def upload_file():
                         
                 except Exception as e:
                     log_action("Upload Error", f"Error in audio upload pipeline: {str(e)}")
-                    # Try cleaning up unique temp path if it exists
                     if 'unique_temp_path' in locals() and os.path.exists(unique_temp_path):
                         try:
                             os.remove(unique_temp_path)
@@ -340,21 +415,22 @@ def upload_file():
                 log_action("Video Upload Started", f"File: {filename}")
                 
                 try:
-                    # Generate unique temp filename to prevent collision in UPLOAD_TEMP
-                    import uuid
-                    unique_temp_filename = f"video_temp_{uuid.uuid4().hex}.{file_ext}"
-                    unique_temp_path = os.path.join(app.config['UPLOAD_TEMP'], unique_temp_filename)
-                    os.rename(temp_path, unique_temp_path)
+                    from utils import get_file_hash
+                    file_hash = get_file_hash(temp_path)
+                    file_size = os.path.getsize(temp_path)
                     
                     # Generate S3 key/uuid filename
+                    import uuid
                     s3_filename = f"video_{uuid.uuid4().hex}.{file_ext}"
+                    unique_temp_path = os.path.join(app.config['UPLOAD_TEMP'], s3_filename)
+                    os.rename(temp_path, unique_temp_path)
                     
                     # Store placeholder in video_records DB table immediately
                     conn = get_db_connection()
                     conn.execute("""
                         INSERT INTO video_records 
-                        (user_id, original_filename, uuid_filename, s3_object_key, status, transcript, embedding)
-                        VALUES (?, ?, ?, ?, ?, ?, ?)
+                        (user_id, original_filename, uuid_filename, s3_object_key, status, transcript, embedding, file_hash, file_size)
+                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
                     """, (
                         current_user.id,
                         filename,
@@ -362,7 +438,9 @@ def upload_file():
                         s3_filename,
                         "processing",
                         "Processing video...",
-                        "[]"
+                        "[]",
+                        file_hash,
+                        file_size
                     ))
                     conn.commit()
                     
@@ -380,21 +458,17 @@ def upload_file():
                     def run_video_async_pipeline(rec_id, t_path, orig_name, s3_name):
                         temp_extracted_audio = None
                         try:
-                            # 1. Upload video directly to S3 first
-                            from utils import upload_to_s3
-                            if not upload_to_s3(t_path, s3_name):
-                                raise RuntimeError("S3 upload failed")
-                            print(f"[AsyncVideo] Uploaded {orig_name} to S3 immediately.")
-                            
-                            # 2. Extract audio track using FFmpeg
+                            # 1. Extract audio track using FFmpeg (directly from local server cached file)
                             import subprocess
                             import uuid
                             audio_filename = f"extracted_{uuid.uuid4().hex}.mp3"
                             temp_extracted_audio = os.path.join(app.config['UPLOAD_TEMP'], audio_filename)
                             
+                            # Limit audio extraction to first 60 seconds for speed
                             cmd = [
                                 "ffmpeg", "-y", "-i", t_path, 
                                 "-vn", "-acodec", "libmp3lame", "-ar", "16000", "-ac", "1", 
+                                "-ss", "0", "-t", "60",
                                 temp_extracted_audio
                             ]
                             
@@ -414,7 +488,7 @@ def upload_file():
                             if process.returncode == 0 and os.path.exists(temp_extracted_audio) and os.path.getsize(temp_extracted_audio) > 1000:
                                 print(f"[AsyncVideo] Audio track successfully extracted. Running Whisper transcription...")
                                 
-                                # 3. Convert speech into text using Whisper ASR
+                                # 2. Convert speech into text using Whisper ASR
                                 from whisper_service import whisper_service
                                 transcription_result = whisper_service.transcribe(temp_extracted_audio)
                                 transcript = transcription_result["transcript"]
@@ -422,11 +496,11 @@ def upload_file():
                                 duration = transcription_result["duration"]
                                 
                                 if transcript.strip():
-                                    # 4. Generate semantic embeddings using Sentence-BERT
+                                    # 3. Generate semantic embeddings using Sentence-BERT
                                     from sentencebert_service import sentencebert_service
                                     embedding = sentencebert_service.generate_embedding(transcript)
                                     
-                                    # 5. Compare embedding against other stored video transcripts (excluding ourselves)
+                                    # 4. Compare embedding against other stored video transcripts (excluding ourselves)
                                     from similarity_service import similarity_service
                                     similarity_result = similarity_service.find_highest_similarity(
                                         embedding, 
@@ -442,6 +516,30 @@ def upload_file():
                                     matched_record = similarity_result.get("matched_record")
                                     matched_filename = matched_record["original_filename"] if matched_record else None
                                     matched_transcript = matched_record["transcript"] if matched_record else None
+                                    
+                            # 5. If status is completed (similarity < 60%), upload to S3 now and delete local file
+                            if status == "completed":
+                                local_storage_fallback = False
+                                if Config.USE_S3:
+                                    from utils import upload_to_s3
+                                    if not upload_to_s3(t_path, s3_name):
+                                        print("[AsyncVideo] S3 upload failed, falling back to local storage.")
+                                        local_storage_fallback = True
+                                    else:
+                                        print(f"[AsyncVideo] Uploaded {orig_name} to S3 immediately as it is unique.")
+                                        if os.path.exists(t_path):
+                                            os.remove(t_path)
+                                else:
+                                    local_storage_fallback = True
+                                    
+                                if local_storage_fallback:
+                                    # Fallback to local storage
+                                    stored_path = os.path.join(Config.UPLOAD_STORED, s3_name)
+                                    import shutil
+                                    shutil.copy2(t_path, stored_path)
+                                    print(f"[AsyncVideo] Stored {orig_name} locally as S3 is disabled or failed.")
+                                    if os.path.exists(t_path):
+                                        os.remove(t_path)
                                     
                             # 6. Update database record with final values
                             import json
@@ -479,13 +577,12 @@ def upload_file():
                                 conn_thread.close()
                             except Exception as db_err:
                                 print(f"[AsyncVideo] Error updating failure status: {db_err}")
-                        finally:
-                            # Cleanup local temp files
                             if os.path.exists(t_path):
                                 try:
                                     os.remove(t_path)
                                 except:
                                     pass
+                        finally:
                             if temp_extracted_audio and os.path.exists(temp_extracted_audio):
                                 try:
                                     os.remove(temp_extracted_audio)
@@ -659,7 +756,7 @@ def upload_file():
                 match_type = "identical"
             elif near_duplicate_files:
                 match_type = "near_duplicate"
-            elif prediction == 1 or freq > 0 or similar_files:
+            elif prediction == "Duplicate Likely" or freq > 0 or similar_files:
                 match_type = "similar"
             
             # If duplicates detected (identical, near-duplicate, or similar), show confirmation page
@@ -674,7 +771,7 @@ def upload_file():
                                      similar_files=similar_files,
                                      near_duplicate_files=near_duplicate_files,
                                      match_type=match_type,
-                                     ml_confidence="High" if prediction == 1 else "Medium")
+                                     ml_confidence="High" if prediction == "Duplicate Likely" else "Medium")
 
 
             
@@ -811,6 +908,125 @@ def confirm_upload():
     return redirect(url_for('dashboard'))
 
 
+@app.route('/api/check_media_hash', methods=['GET'])
+@login_required
+def api_check_media_hash():
+    media_hash = request.args.get('hash')
+    media_type = request.args.get('type')  # 'audio' or 'video'
+    if not media_hash or not media_type:
+        return jsonify({"error": "Missing hash or type parameter"}), 400
+        
+    table = "audio_records" if media_type == "audio" else "video_records"
+    conn = get_db_connection()
+    try:
+        record = conn.execute(f"""
+            SELECT id, original_filename, uuid_filename, transcript, language, duration, similarity_score, s3_object_key 
+            FROM {table} 
+            WHERE file_hash = ? AND status = 'completed'
+            LIMIT 1
+        """, (media_hash,)).fetchone()
+        
+        if record:
+            return jsonify({
+                "exists": True,
+                "record": {
+                    "id": record["id"],
+                    "original_filename": record["original_filename"],
+                    "transcript": record["transcript"],
+                    "language": record["language"],
+                    "duration": record["duration"],
+                    "similarity_score": record["similarity_score"]
+                }
+            })
+        else:
+            return jsonify({"exists": False})
+    except Exception as e:
+        print(f"Error checking media hash: {e}")
+        return jsonify({"error": str(e)}), 500
+    finally:
+        conn.close()
+
+@app.route('/api/link_media', methods=['POST'])
+@login_required
+def api_link_media():
+    try:
+        data = request.get_json()
+        if not data:
+            return jsonify({"error": "Invalid JSON data"}), 400
+            
+        media_hash = data.get('hash')
+        media_type = data.get('type')  # 'audio' or 'video'
+        original_filename = data.get('original_filename')
+        
+        if not media_hash or not media_type or not original_filename:
+            return jsonify({"error": "Missing hash, type, or original_filename"}), 400
+            
+        table = "audio_records" if media_type == "audio" else "video_records"
+        conn = get_db_connection()
+        
+        # Find the existing record to copy metadata from
+        existing = conn.execute(f"""
+            SELECT transcript, embedding, language, duration, s3_object_key, similarity_score 
+            FROM {table} 
+            WHERE file_hash = ? AND status = 'completed'
+            LIMIT 1
+        """, (media_hash,)).fetchone()
+        
+        if not existing:
+            conn.close()
+            return jsonify({"error": "No existing completed record found for this hash"}), 404
+            
+        import uuid
+        new_uuid_filename = f"{media_type}_{uuid.uuid4().hex}.{original_filename.split('.')[-1]}"
+        
+        if media_type == 'audio':
+            conn.execute("""
+                INSERT INTO audio_records 
+                (user_id, original_filename, uuid_filename, transcript, embedding, language, duration, s3_object_key, similarity_score, status, file_hash)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """, (
+                current_user.id,
+                original_filename,
+                new_uuid_filename,
+                existing["transcript"],
+                existing["embedding"],
+                existing["language"],
+                existing["duration"],
+                existing["s3_object_key"],  # pointing to existing S3 file
+                existing["similarity_score"],
+                "completed",
+                media_hash
+            ))
+        else: # video
+            conn.execute("""
+                INSERT INTO video_records 
+                (user_id, original_filename, uuid_filename, s3_object_key, transcript, embedding, language, duration, similarity_score, status, file_hash)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """, (
+                current_user.id,
+                original_filename,
+                new_uuid_filename,
+                existing["s3_object_key"],  # pointing to existing S3 file
+                existing["transcript"],
+                existing["embedding"],
+                existing["language"],
+                existing["duration"],
+                existing["similarity_score"],
+                "completed",
+                media_hash
+            ))
+            
+        conn.commit()
+        conn.close()
+        
+        log_action("Deduplication Link", f"Linked {media_type} file {original_filename} to existing S3 object {existing['s3_object_key']} via hash {media_hash}")
+        
+        return jsonify({"status": "success", "message": f"{media_type.capitalize()} linked successfully!"})
+    except Exception as e:
+        print(f"Error linking media: {e}")
+        return jsonify({"error": str(e)}), 500
+
+
 @app.route('/confirm_audio_upload', methods=['POST'])
 @login_required
 def confirm_audio_upload():
@@ -904,13 +1120,33 @@ def dashboard():
     files = conn.execute("SELECT * FROM files").fetchall()
     total_files = len(files)
     
-    logical_size = conn.execute("""
+    logical_std = conn.execute("""
         SELECT SUM(f.file_size) 
         FROM uploads u 
         JOIN files f ON u.file_id = f.id
     """).fetchone()[0] or 0
-    
-    physical_size = conn.execute("SELECT SUM(file_size) FROM files").fetchall()[0][0] or 0
+    physical_std = conn.execute("SELECT SUM(file_size) FROM files").fetchone()[0] or 0
+
+    logical_audio = conn.execute("SELECT SUM(file_size) FROM audio_records").fetchone()[0] or 0
+    physical_audio = conn.execute("""
+        SELECT SUM(unique_size) FROM (
+            SELECT MAX(file_size) as unique_size 
+            FROM audio_records 
+            GROUP BY COALESCE(file_hash, CONCAT('no_hash_', id))
+        ) t
+    """).fetchone()[0] or 0
+
+    logical_video = conn.execute("SELECT SUM(file_size) FROM video_records").fetchone()[0] or 0
+    physical_video = conn.execute("""
+        SELECT SUM(unique_size) FROM (
+            SELECT MAX(file_size) as unique_size 
+            FROM video_records 
+            GROUP BY COALESCE(file_hash, CONCAT('no_hash_', id))
+        ) t
+    """).fetchone()[0] or 0
+
+    logical_size = logical_std + logical_audio + logical_video
+    physical_size = physical_std + physical_audio + physical_video
     
     dedup_rate = 0
     if logical_size > 0:
@@ -1171,32 +1407,42 @@ def open_audio(audio_id):
     s3_key = audio['s3_object_key']
     filename = audio['original_filename']
     
+    local_stored_path = os.path.join(Config.UPLOAD_STORED, s3_key)
+    
+    ext = filename.split('.')[-1].lower()
+    mimetype = 'audio/mpeg'
+    if ext == 'wav': mimetype = 'audio/wav'
+    elif ext == 'ogg': mimetype = 'audio/ogg'
+    elif ext == 'aac': mimetype = 'audio/aac'
+    elif ext == 'flac': mimetype = 'audio/x-flac'
+    elif ext == 'm4a': mimetype = 'audio/mp4'
+    
+    if os.path.exists(local_stored_path):
+        def generate():
+            with open(local_stored_path, 'rb') as f:
+                yield from f
+        from flask import Response
+        return Response(generate(), mimetype=mimetype,
+                        headers={"Content-Disposition": f"inline;filename={filename}"})
+                        
     from utils import get_s3_client
     s3 = get_s3_client()
     if not s3:
-        flash("S3 service is not available.")
+        flash("File not found locally and S3 service is not available.")
         return redirect(url_for('dashboard'))
         
     temp_path = os.path.join(Config.UPLOAD_TEMP, f"open_{s3_key}")
     try:
         s3.download_file(Config.S3_BUCKET_NAME, s3_key, temp_path)
         
-        ext = filename.split('.')[-1].lower()
-        mimetype = 'audio/mpeg'
-        if ext == 'wav': mimetype = 'audio/wav'
-        elif ext == 'ogg': mimetype = 'audio/ogg'
-        elif ext == 'aac': mimetype = 'audio/aac'
-        elif ext == 'flac': mimetype = 'audio/x-flac'
-        elif ext == 'm4a': mimetype = 'audio/mp4'
-        
-        def generate():
+        def generate_s3():
             with open(temp_path, 'rb') as f:
                 yield from f
             if os.path.exists(temp_path):
                 os.remove(temp_path)
                 
         from flask import Response
-        return Response(generate(), mimetype=mimetype,
+        return Response(generate_s3(), mimetype=mimetype,
                         headers={"Content-Disposition": f"inline;filename={filename}"})
     except Exception as e:
         flash(f"Error opening audio: {e}")
@@ -1238,6 +1484,58 @@ def rename_audio(audio_id):
         
     return redirect(url_for('dashboard'))
 
+def run_bg_s3_upload(record_id, local_path, s3_key, table_name, original_filename):
+    def job():
+        try:
+            print(f"[BG-S3-Upload] Starting upload for {original_filename} to S3 Key: {s3_key}...")
+            from utils import upload_to_s3
+            if upload_to_s3(local_path, s3_key):
+                print(f"[BG-S3-Upload] Upload complete. Updating {table_name} record ID {record_id} to completed.")
+                conn = get_db_connection()
+                conn.execute(f"UPDATE {table_name} SET status = 'completed' WHERE id = ?", (record_id,))
+                conn.commit()
+                conn.close()
+            else:
+                print(f"[BG-S3-Upload] Upload failed for {original_filename}. Falling back to local storage.")
+                stored_path = os.path.join(Config.UPLOAD_STORED, s3_key)
+                import shutil
+                shutil.copy2(local_path, stored_path)
+                print(f"[BG-S3-Upload] Stored {original_filename} locally.")
+                conn = get_db_connection()
+                conn.execute(f"UPDATE {table_name} SET status = 'completed' WHERE id = ?", (record_id,))
+                conn.commit()
+                conn.close()
+        except Exception as e:
+            print(f"[BG-S3-Upload] Error during background S3 upload: {e}. Falling back to local storage.")
+            try:
+                stored_path = os.path.join(Config.UPLOAD_STORED, s3_key)
+                import shutil
+                shutil.copy2(local_path, stored_path)
+                conn = get_db_connection()
+                conn.execute(f"UPDATE {table_name} SET status = 'completed' WHERE id = ?", (record_id,))
+                conn.commit()
+                conn.close()
+            except Exception as fallback_err:
+                print(f"[BG-S3-Upload] Fallback failed: {fallback_err}")
+                try:
+                    conn = get_db_connection()
+                    conn.execute(f"UPDATE {table_name} SET status = 'failed' WHERE id = ?", (record_id,))
+                    conn.commit()
+                    conn.close()
+                except:
+                    pass
+        finally:
+            if os.path.exists(local_path):
+                try:
+                    os.remove(local_path)
+                    print(f"[BG-S3-Upload] Cleaned up local file: {local_path}")
+                except Exception as clean_err:
+                    print(f"[BG-S3-Upload] Error deleting local file: {clean_err}")
+
+    import threading
+    threading.Thread(target=job, daemon=True).start()
+
+
 @app.route('/audio/delete/<int:audio_id>', methods=['POST'])
 @login_required
 def delete_audio(audio_id):
@@ -1256,12 +1554,37 @@ def delete_audio(audio_id):
     s3_key = audio['s3_object_key']
     filename = audio['original_filename']
     
+    # 1. Clean up local temp file if it exists
+    local_path = os.path.join(app.config['UPLOAD_TEMP'], audio['uuid_filename'])
+    if os.path.exists(local_path):
+        try:
+            os.remove(local_path)
+            print(f"[Delete] Cleaned up local temp file: {local_path}")
+        except Exception as clean_err:
+            print(f"[Delete] Error deleting local temp file: {clean_err}")
+            
     try:
-        from utils import get_s3_client
-        s3 = get_s3_client()
-        if s3:
-            s3.delete_object(Bucket=Config.S3_BUCKET_NAME, Key=s3_key)
-            log_action("Delete", f"Deleted audio {filename} from S3")
+        # 2. Check references of this file in audio_records
+        count_cursor = conn.execute("SELECT COUNT(*) FROM audio_records WHERE s3_object_key = ?", (s3_key,))
+        ref_count = count_cursor.fetchone()[0]
+        
+        if ref_count <= 1:
+            if Config.USE_S3:
+                from utils import get_s3_client
+                s3 = get_s3_client()
+                if s3:
+                    try:
+                        s3.delete_object(Bucket=Config.S3_BUCKET_NAME, Key=s3_key)
+                        log_action("Delete", f"Deleted audio {filename} from S3")
+                    except Exception as s3_err:
+                        print(f"Error deleting audio from S3: {s3_err}")
+            
+            stored_path = os.path.join(Config.UPLOAD_STORED, s3_key)
+            if os.path.exists(stored_path):
+                os.remove(stored_path)
+                log_action("Delete", f"Deleted audio {filename} from local storage")
+        else:
+            log_action("Delete Reference", f"Audio record {filename} deleted, file kept (referenced by {ref_count - 1} other records)")
             
         conn.execute("DELETE FROM audio_records WHERE id = ?", (audio_id,))
         conn.commit()
@@ -1272,6 +1595,7 @@ def delete_audio(audio_id):
         conn.close()
         
     return redirect(url_for('dashboard'))
+
 
 @app.route('/audio/confirm_store/<int:audio_id>', methods=['POST'])
 @login_required
@@ -1289,13 +1613,37 @@ def confirm_store_audio(audio_id):
         return redirect(url_for('dashboard'))
         
     try:
-        conn.execute("UPDATE audio_records SET status = 'completed' WHERE id = ?", (audio_id,))
-        conn.commit()
-        flash(f"Audio '{audio['original_filename']}' successfully stored.")
+        if Config.USE_S3:
+            # Set status to processing during S3 upload
+            conn.execute("UPDATE audio_records SET status = 'processing' WHERE id = ?", (audio_id,))
+            conn.commit()
+            conn.close()
+            
+            local_path = os.path.join(app.config['UPLOAD_TEMP'], audio['uuid_filename'])
+            if os.path.exists(local_path):
+                run_bg_s3_upload(audio_id, local_path, audio['s3_object_key'], "audio_records", audio['original_filename'])
+                flash(f"Audio '{audio['original_filename']}' is being stored in the cloud.")
+            else:
+                conn = get_db_connection()
+                conn.execute("UPDATE audio_records SET status = 'completed' WHERE id = ?", (audio_id,))
+                conn.commit()
+                conn.close()
+                flash(f"Audio '{audio['original_filename']}' successfully stored.")
+        else:
+            # Local storage fallback
+            local_path = os.path.join(app.config['UPLOAD_TEMP'], audio['uuid_filename'])
+            if os.path.exists(local_path):
+                stored_path = os.path.join(Config.UPLOAD_STORED, audio['uuid_filename'])
+                import shutil
+                shutil.copy2(local_path, stored_path)
+                os.remove(local_path)
+                print(f"[ConfirmStore] Audio {audio['original_filename']} stored locally.")
+            conn.execute("UPDATE audio_records SET status = 'completed' WHERE id = ?", (audio_id,))
+            conn.commit()
+            conn.close()
+            flash(f"Audio '{audio['original_filename']}' successfully stored locally.")
     except Exception as e:
         flash(f"Error storing audio: {e}")
-    finally:
-        conn.close()
         
     return redirect(url_for('dashboard'))
 
@@ -1357,15 +1705,39 @@ def confirm_store_video(video_id):
         return redirect(url_for('dashboard'))
         
     try:
-        conn.execute("UPDATE video_records SET status = 'completed' WHERE id = ?", (video_id,))
-        conn.commit()
-        flash(f"Video '{video['original_filename']}' successfully stored.")
+        if Config.USE_S3:
+            conn.execute("UPDATE video_records SET status = 'processing' WHERE id = ?", (video_id,))
+            conn.commit()
+            conn.close()
+            
+            local_path = os.path.join(app.config['UPLOAD_TEMP'], video['uuid_filename'])
+            if os.path.exists(local_path):
+                run_bg_s3_upload(video_id, local_path, video['s3_object_key'], "video_records", video['original_filename'])
+                flash(f"Video '{video['original_filename']}' is being stored in the cloud.")
+            else:
+                conn = get_db_connection()
+                conn.execute("UPDATE video_records SET status = 'completed' WHERE id = ?", (video_id,))
+                conn.commit()
+                conn.close()
+                flash(f"Video '{video['original_filename']}' successfully stored.")
+        else:
+            # Local storage fallback
+            local_path = os.path.join(app.config['UPLOAD_TEMP'], video['uuid_filename'])
+            if os.path.exists(local_path):
+                stored_path = os.path.join(Config.UPLOAD_STORED, video['uuid_filename'])
+                import shutil
+                shutil.copy2(local_path, stored_path)
+                os.remove(local_path)
+                print(f"[ConfirmStore] Video {video['original_filename']} stored locally.")
+            conn.execute("UPDATE video_records SET status = 'completed' WHERE id = ?", (video_id,))
+            conn.commit()
+            conn.close()
+            flash(f"Video '{video['original_filename']}' successfully stored locally.")
     except Exception as e:
         flash(f"Error storing video: {e}")
-    finally:
-        conn.close()
         
     return redirect(url_for('dashboard'))
+
 
 @app.route('/video/open/<int:video_id>')
 @login_required
@@ -1385,31 +1757,41 @@ def open_video(video_id):
     s3_key = video['s3_object_key']
     filename = video['original_filename']
     
+    local_stored_path = os.path.join(Config.UPLOAD_STORED, s3_key)
+    
+    ext = filename.split('.')[-1].lower()
+    mimetype = 'video/mp4'
+    if ext == 'webm': mimetype = 'video/webm'
+    elif ext == 'ogg': mimetype = 'video/ogg'
+    elif ext == 'avi': mimetype = 'video/x-msvideo'
+    elif ext == 'mov': mimetype = 'video/quicktime'
+    
+    if os.path.exists(local_stored_path):
+        def generate():
+            with open(local_stored_path, 'rb') as f:
+                yield from f
+        from flask import Response
+        return Response(generate(), mimetype=mimetype,
+                        headers={"Content-Disposition": f"inline;filename={filename}"})
+                        
     from utils import get_s3_client
     s3 = get_s3_client()
     if not s3:
-        flash("S3 service is not available.")
+        flash("File not found locally and S3 service is not available.")
         return redirect(url_for('dashboard'))
         
     temp_path = os.path.join(Config.UPLOAD_TEMP, f"open_{s3_key}")
     try:
         s3.download_file(Config.S3_BUCKET_NAME, s3_key, temp_path)
         
-        ext = filename.split('.')[-1].lower()
-        mimetype = 'video/mp4'
-        if ext == 'webm': mimetype = 'video/webm'
-        elif ext == 'ogg': mimetype = 'video/ogg'
-        elif ext == 'avi': mimetype = 'video/x-msvideo'
-        elif ext == 'mov': mimetype = 'video/quicktime'
-        
-        def generate():
+        def generate_s3():
             with open(temp_path, 'rb') as f:
                 yield from f
             if os.path.exists(temp_path):
                 os.remove(temp_path)
                 
         from flask import Response
-        return Response(generate(), mimetype=mimetype,
+        return Response(generate_s3(), mimetype=mimetype,
                         headers={"Content-Disposition": f"inline;filename={filename}"})
     except Exception as e:
         flash(f"Error opening video: {e}")
@@ -1451,6 +1833,7 @@ def rename_video(video_id):
         
     return redirect(url_for('dashboard'))
 
+
 @app.route('/video/delete/<int:video_id>', methods=['POST'])
 @login_required
 def delete_video(video_id):
@@ -1469,12 +1852,37 @@ def delete_video(video_id):
     s3_key = video['s3_object_key']
     filename = video['original_filename']
     
+    # 1. Clean up local temp file if it exists
+    local_path = os.path.join(app.config['UPLOAD_TEMP'], video['uuid_filename'])
+    if os.path.exists(local_path):
+        try:
+            os.remove(local_path)
+            print(f"[Delete] Cleaned up local temp file: {local_path}")
+        except Exception as clean_err:
+            print(f"[Delete] Error deleting local temp file: {clean_err}")
+            
     try:
-        from utils import get_s3_client
-        s3 = get_s3_client()
-        if s3:
-            s3.delete_object(Bucket=Config.S3_BUCKET_NAME, Key=s3_key)
-            log_action("Delete", f"Deleted video {filename} from S3")
+        # 2. Check references of this file in video_records
+        count_cursor = conn.execute("SELECT COUNT(*) FROM video_records WHERE s3_object_key = ?", (s3_key,))
+        ref_count = count_cursor.fetchone()[0]
+        
+        if ref_count <= 1:
+            if Config.USE_S3:
+                from utils import get_s3_client
+                s3 = get_s3_client()
+                if s3:
+                    try:
+                        s3.delete_object(Bucket=Config.S3_BUCKET_NAME, Key=s3_key)
+                        log_action("Delete", f"Deleted video {filename} from S3")
+                    except Exception as s3_err:
+                        print(f"Error deleting video from S3: {s3_err}")
+            
+            stored_path = os.path.join(Config.UPLOAD_STORED, s3_key)
+            if os.path.exists(stored_path):
+                os.remove(stored_path)
+                log_action("Delete", f"Deleted video {filename} from local storage")
+        else:
+            log_action("Delete Reference", f"Video record {filename} deleted, file kept (referenced by {ref_count - 1} other records)")
             
         conn.execute("DELETE FROM video_records WHERE id = ?", (video_id,))
         conn.commit()

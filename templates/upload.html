@@ -120,6 +120,27 @@
 </div>
 
 <script>
+function calculateSHA256(file) {
+    return new Promise((resolve, reject) => {
+        const reader = new FileReader();
+        reader.onload = async function() {
+            try {
+                const arrayBuffer = reader.result;
+                const hashBuffer = await crypto.subtle.digest('SHA-256', arrayBuffer);
+                const hashArray = Array.from(new Uint8Array(hashBuffer));
+                const hashHex = hashArray.map(b => b.toString(16).padStart(2, '0')).join('');
+                resolve(hashHex);
+            } catch (e) {
+                reject(e);
+            }
+        };
+        reader.onerror = function() {
+            reject(reader.error);
+        };
+        reader.readAsArrayBuffer(file);
+    });
+}
+
 document.addEventListener('DOMContentLoaded', function() {
     const form = document.querySelector('form.dropzone-sim');
     const fileInput = document.getElementById('file');
@@ -146,21 +167,119 @@ document.addEventListener('DOMContentLoaded', function() {
                 event.preventDefault();
                 
                 const isVideo = supportedVideo.includes(ext);
+                const mediaType = isVideo ? 'video' : 'audio';
                 
-                // Dynamically update loader text
+                // Show processing loader
                 const loaderHeader = loader.querySelector('h3');
                 const loaderText = loader.querySelector('p');
                 if (loaderHeader && loaderText) {
-                    if (supportedAudio.includes(ext)) {
-                        loaderHeader.textContent = "Processing Audio with AI";
-                        loaderText.textContent = "Transcribing speech using OpenAI Whisper and generating semantic embeddings. This may take a few moments...";
-                    } else {
-                        loaderHeader.textContent = "Processing Video with AI";
-                        loaderText.textContent = "Extracting audio track from video, transcribing speech using OpenAI Whisper, and generating semantic embeddings. This may take a few moments...";
-                    }
+                    loaderHeader.textContent = "Checking for Duplicates";
+                    loaderText.textContent = "Computing cryptographic hash to check if this file is already stored...";
                 }
                 
-                // Show processing loader
+                loader.classList.remove('d-none');
+                loader.classList.add('d-flex');
+                
+                calculateSHA256(file).then(hash => {
+                    fetch(`/api/check_media_hash?hash=${hash}&type=${mediaType}`)
+                    .then(res => res.json())
+                    .then(hashData => {
+                        if (hashData.exists) {
+                            // Hide loader
+                            loader.classList.add('d-none');
+                            loader.classList.remove('d-flex');
+                            
+                            const modalTitle = document.getElementById('audioConfirmModalLabel');
+                            const modalSimilarity = document.getElementById('modalSimilarity');
+                            const modalMatchedFile = document.getElementById('modalMatchedFile');
+                            const modalTranscript = document.getElementById('modalTranscript');
+                            const modalQuestion = document.getElementById('modalQuestion');
+                            
+                            modalTitle.innerHTML = '<i class="bi bi-shield-check-fill me-2 text-success"></i>Duplicate File Found';
+                            modalSimilarity.textContent = '100.00%';
+                            modalSimilarity.className = "display-4 fw-bold text-success mb-1";
+                            modalMatchedFile.textContent = hashData.record.original_filename;
+                            modalTranscript.textContent = hashData.record.transcript || 'No transcript preview available.';
+                            modalQuestion.textContent = 'This exact file is already stored in the system. Do you want to link it to your account instantly (no upload/processing needed)?';
+                            
+                            confirmModal.show();
+                            
+                            const btnStoreAnyway = document.getElementById('btnStoreAnyway');
+                            const btnCancelUpload = document.getElementById('btnCancelUpload');
+                            
+                            const newBtnStore = btnStoreAnyway.cloneNode(true);
+                            const newBtnCancel = btnCancelUpload.cloneNode(true);
+                            btnStoreAnyway.parentNode.replaceChild(newBtnStore, btnStoreAnyway);
+                            btnCancelUpload.parentNode.replaceChild(newBtnCancel, btnCancelUpload);
+                            
+                            newBtnStore.textContent = "Link Instantly";
+                            newBtnStore.className = "btn btn-success px-4 py-2 rounded-pill fw-bold text-white";
+                            newBtnStore.addEventListener('click', function() {
+                                confirmModal.hide();
+                                loaderHeader.textContent = "Linking File";
+                                loaderText.textContent = "Adding link to existing storage reference...";
+                                loader.classList.remove('d-none');
+                                loader.classList.add('d-flex');
+                                
+                                fetch('/api/link_media', {
+                                    method: 'POST',
+                                    headers: {
+                                        'Content-Type': 'application/json'
+                                    },
+                                    body: JSON.stringify({
+                                        hash: hash,
+                                        type: mediaType,
+                                        original_filename: filename
+                                    })
+                                })
+                                .then(linkRes => {
+                                    if (!linkRes.ok) throw new Error('Linking failed');
+                                    return linkRes.json();
+                                })
+                                .then(() => {
+                                    loader.classList.add('d-none');
+                                    loader.classList.remove('d-flex');
+                                    window.location.href = '/dashboard';
+                                })
+                                .catch(err => {
+                                    loader.classList.add('d-none');
+                                    loader.classList.remove('d-flex');
+                                    alert('Linking error: ' + err.message);
+                                });
+                            });
+                            
+                            newBtnCancel.textContent = "Upload Anyway";
+                            newBtnCancel.className = "btn btn-outline-warning px-4 py-2 rounded-pill fw-bold";
+                            newBtnCancel.addEventListener('click', function() {
+                                confirmModal.hide();
+                                performStandardUpload(file, filename, ext, isVideo);
+                            });
+                        } else {
+                            performStandardUpload(file, filename, ext, isVideo);
+                        }
+                    })
+                    .catch(err => {
+                        console.error('Hash check request failed, processing standard upload:', err);
+                        performStandardUpload(file, filename, ext, isVideo);
+                    });
+                })
+                .catch(err => {
+                    console.error('Cryptographic hash computation failed, processing standard upload:', err);
+                    performStandardUpload(file, filename, ext, isVideo);
+                });
+            }
+            
+            function performStandardUpload(file, filename, ext, isVideo) {
+                const loaderHeader = loader.querySelector('h3');
+                const loaderText = loader.querySelector('p');
+                if (supportedAudio.includes(ext)) {
+                    loaderHeader.textContent = "Processing Audio with AI";
+                    loaderText.textContent = "Transcribing speech using OpenAI Whisper and generating semantic embeddings. This may take a few moments...";
+                } else {
+                    loaderHeader.textContent = "Processing Video with AI";
+                    loaderText.textContent = "Extracting audio track from video, transcribing speech using OpenAI Whisper, and generating semantic embeddings. This may take a few moments...";
+                }
+                
                 loader.classList.remove('d-none');
                 loader.classList.add('d-flex');
                 
@@ -178,7 +297,6 @@ document.addEventListener('DOMContentLoaded', function() {
                 })
                 .then(data => {
                     if (data.status === 'processing') {
-                        // Start polling for media processing status in real-time
                         const mediaId = isVideo ? data.video_id : data.audio_id;
                         const statusUrl = isVideo ? '/video/status/' + mediaId : '/audio/status/' + mediaId;
                         const confirmUrl = isVideo ? '/video/confirm_store/' + mediaId : '/audio/confirm_store/' + mediaId;
@@ -193,40 +311,41 @@ document.addEventListener('DOMContentLoaded', function() {
                             .then(statusData => {
                                 if (statusData.status === 'pending_confirmation') {
                                     clearInterval(pollInterval);
-                                    
-                                    // Hide loader
                                     loader.classList.add('d-none');
                                     loader.classList.remove('d-flex');
                                     
-                                    // Custom modal title and description for video vs audio
                                     const modalTitle = document.getElementById('audioConfirmModalLabel');
+                                    const modalSimilarity = document.getElementById('modalSimilarity');
+                                    const modalMatchedFile = document.getElementById('modalMatchedFile');
+                                    const modalTranscript = document.getElementById('modalTranscript');
                                     const modalQuestion = document.getElementById('modalQuestion');
+                                    
+                                    modalSimilarity.className = "display-4 fw-bold text-warning mb-1";
+                                    
                                     if (isVideo) {
-                                        modalTitle.innerHTML = '<i class="bi bi-exclamation-triangle-fill me-2"></i>Similar Video Found';
+                                        modalTitle.innerHTML = '<i class="bi bi-exclamation-triangle-fill me-2 text-warning"></i>Similar Video Found';
                                         modalQuestion.textContent = 'Do you want to store this video?';
                                     } else {
-                                        modalTitle.innerHTML = '<i class="bi bi-exclamation-triangle-fill me-2"></i>Similar Audio Found';
+                                        modalTitle.innerHTML = '<i class="bi bi-exclamation-triangle-fill me-2 text-warning"></i>Similar Audio Found';
                                         modalQuestion.textContent = 'Do you want to store this audio?';
                                     }
                                     
-                                    // Populate similarity modal details
-                                    document.getElementById('modalSimilarity').textContent = (statusData.similarity * 100).toFixed(2) + '%';
-                                    document.getElementById('modalMatchedFile').textContent = statusData.matched_file || 'Unknown';
-                                    document.getElementById('modalTranscript').textContent = statusData.matched_transcript || 'No transcript preview available';
+                                    modalSimilarity.textContent = (statusData.similarity * 100).toFixed(2) + '%';
+                                    modalMatchedFile.textContent = statusData.matched_file || 'Unknown';
+                                    modalTranscript.textContent = statusData.matched_transcript || 'No transcript preview available';
                                     
-                                    // Show confirmation options modal
                                     confirmModal.show();
                                     
-                                    // Add handlers for confirmation buttons
                                     const btnStoreAnyway = document.getElementById('btnStoreAnyway');
                                     const btnCancelUpload = document.getElementById('btnCancelUpload');
                                     
-                                    // Re-clone buttons to clear old event listeners
                                     const newBtnStore = btnStoreAnyway.cloneNode(true);
                                     const newBtnCancel = btnCancelUpload.cloneNode(true);
                                     btnStoreAnyway.parentNode.replaceChild(newBtnStore, btnStoreAnyway);
                                     btnCancelUpload.parentNode.replaceChild(newBtnCancel, btnCancelUpload);
                                     
+                                    newBtnStore.textContent = "Store Anyway";
+                                    newBtnStore.className = "btn btn-warning px-4 py-2 rounded-pill fw-bold text-dark";
                                     newBtnStore.addEventListener('click', function() {
                                         confirmModal.hide();
                                         loader.classList.remove('d-none');
@@ -247,6 +366,8 @@ document.addEventListener('DOMContentLoaded', function() {
                                         });
                                     });
                                     
+                                    newBtnCancel.textContent = "Cancel Upload";
+                                    newBtnCancel.className = "btn btn-outline-secondary px-4 py-2 rounded-pill fw-bold";
                                     newBtnCancel.addEventListener('click', function() {
                                         confirmModal.hide();
                                         loader.classList.remove('d-none');
@@ -267,7 +388,6 @@ document.addEventListener('DOMContentLoaded', function() {
                                             alert('Error cancelling upload: ' + err.message);
                                         });
                                     });
-                                    
                                 } else if (statusData.status === 'completed') {
                                     clearInterval(pollInterval);
                                     loader.classList.add('d-none');
@@ -285,7 +405,6 @@ document.addEventListener('DOMContentLoaded', function() {
                                 console.error('Status check error:', pollErr);
                             });
                         }, 2000);
-                        
                     } else if (data.status === 'success') {
                         loader.classList.add('d-none');
                         loader.classList.remove('d-flex');

@@ -77,7 +77,7 @@ def log_action(action, details):
     conn.close()
     
     log_file = os.path.join(Config.LOGS_DIR, 'system.log')
-    with open(log_file, 'a') as f:
+    with open(log_file, 'a', encoding='utf-8') as f:
         f.write(f"[{datetime.now()}] {action}: {details}\n")
 
 # S3 Client Lazy-Loader

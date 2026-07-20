@@ -28,6 +28,10 @@ def init_audio_db():
         duration FLOAT,
         s3_object_key VARCHAR(1000) NOT NULL,
         similarity_score FLOAT DEFAULT NULL,
+        status VARCHAR(50) DEFAULT 'completed',
+        matched_file VARCHAR(500) DEFAULT NULL,
+        matched_transcript LONGTEXT DEFAULT NULL,
+        file_hash VARCHAR(64) DEFAULT NULL,
         upload_timestamp DATETIME DEFAULT CURRENT_TIMESTAMP,
         FOREIGN KEY (user_id) REFERENCES users(id)
     );

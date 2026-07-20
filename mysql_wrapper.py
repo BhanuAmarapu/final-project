@@ -16,6 +16,12 @@ class SQLiteRow:
     def keys(self):
         return [desc[0] for desc in self.description]
 
+    def get(self, key, default=None):
+        try:
+            return self[key]
+        except KeyError:
+            return default
+
 class SQLiteMimicCursor(pymysql.cursors.Cursor):
     def fetchone(self):
         row = super().fetchone()
