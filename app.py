@@ -617,10 +617,10 @@ def upload_file():
             moderation_result = moderator.moderate_file(temp_path, filename)
             
             if not moderation_result.is_safe:
-                print(f"[MODERATION] [X] REJECTED: {moderation_result.violation_type}")
+                print(f"[MODERATION] [X] FLAGGED: {moderation_result.violation_type}")
                 print(f"[MODERATION] Details: {moderation_result.violation_details}")
                 
-                # Log the rejection in moderation_logs table
+                # Log the flagged content in moderation_logs table
                 try:
                     conn = get_db_connection()
                     flagged_keywords_str = ','.join(moderation_result.flagged_keywords) if moderation_result.flagged_keywords else ''
@@ -642,9 +642,9 @@ def upload_file():
                     ))
                     conn.commit()
                     conn.close()
-                    print(f"[MODERATION] Logged rejection to database")
+                    print(f"[MODERATION] Logged flagged content to database")
                 except Exception as e:
-                    print(f"[MODERATION] Error logging rejection: {e}")
+                    print(f"[MODERATION] Error logging flagged content: {e}")
                 
                 # Create admin alert for suspicious activity
                 try:
@@ -669,16 +669,18 @@ def upload_file():
                 except Exception as e:
                     print(f"[MODERATION] Error creating alert: {e}")
                 
-                # Delete the temp file immediately
-                try:
-                    os.remove(temp_path)
-                    print(f"[MODERATION] Deleted temp file")
-                except Exception as e:
-                    print(f"[MODERATION] Error deleting temp file: {e}")
+                # Show confirmation page instead of rejecting
+                from utils import get_file_hash
+                file_hash = get_file_hash(temp_path)
+                file_size = os.path.getsize(temp_path)
                 
-                # Return rejection message to user
-                flash("Your upload has been rejected due to violation of content policies.", "danger")
-                return redirect(url_for('upload_file'))
+                return render_template('upload_confirmation.html',
+                                     filename=filename,
+                                     temp_path=temp_path,
+                                     file_size=file_size,
+                                     file_hash=file_hash,
+                                     match_type="moderation_flagged",
+                                     moderation_result=moderation_result)
             
             print(f"[MODERATION] [OK] Content passed moderation check")
             
