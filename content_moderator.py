@@ -28,7 +28,15 @@ class SBERTModel:
         if cls._instance is None:
             print("[MODERATION] Loading SBERT model (all-MiniLM-L6-v2)...")
             device = 'cuda' if torch.cuda.is_available() else 'cpu'
-            cls._instance = SentenceTransformer('all-MiniLM-L6-v2', device=device)
+            try:
+                cls._instance = SentenceTransformer('all-MiniLM-L6-v2', device=device)
+            except Exception as e:
+                print(f"[MODERATION] SBERT online load failed: {e}. Retrying with local_files_only=True...")
+                try:
+                    cls._instance = SentenceTransformer('all-MiniLM-L6-v2', device=device, local_files_only=True)
+                except Exception as inner_e:
+                    print(f"[MODERATION] SBERT local cache load failed: {inner_e}")
+                    raise inner_e
         return cls._instance
 
 

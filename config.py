@@ -57,6 +57,9 @@ class Config:
     # Suspicious Upload Detector Configuration
     ENABLE_SUSPICIOUS_DETECTOR = os.getenv('ENABLE_SUSPICIOUS_DETECTOR', 'True').lower() == 'true'  # Enabled for security monitoring
 
+    # Audio Analysis Snippet Duration (seconds)
+    AUDIO_SNIPPET_DURATION = int(os.getenv('AUDIO_SNIPPET_DURATION', 30))
+
     
     # Rapid upload detection
     RAPID_UPLOAD_THRESHOLD = int(os.getenv('RAPID_UPLOAD_THRESHOLD', 10))  # uploads

@@ -28,7 +28,15 @@ class SBERTModel:
             print("[DEBUG] Loading Sentence-BERT model (all-MiniLM-L6-v2)...")
             # Force CPU for stability in diverse environments unless CUDA is explicitly needed
             device = 'cuda' if torch.cuda.is_available() else 'cpu'
-            cls._instance = SentenceTransformer('all-MiniLM-L6-v2', device=device)
+            try:
+                cls._instance = SentenceTransformer('all-MiniLM-L6-v2', device=device)
+            except Exception as e:
+                print(f"[DEBUG] SBERT online load failed: {e}. Retrying with local_files_only=True...")
+                try:
+                    cls._instance = SentenceTransformer('all-MiniLM-L6-v2', device=device, local_files_only=True)
+                except Exception as inner_e:
+                    print(f"[DEBUG] SBERT local cache load failed: {inner_e}")
+                    raise inner_e
         return cls._instance
 
 
@@ -44,8 +52,17 @@ class DINOv2Model:
             from transformers import AutoImageProcessor, AutoModel
             import torch
             device = 'cuda' if torch.cuda.is_available() else 'cpu'
-            cls._processor = AutoImageProcessor.from_pretrained('facebook/dinov2-small')
-            cls._instance = AutoModel.from_pretrained('facebook/dinov2-small').to(device)
+            try:
+                cls._processor = AutoImageProcessor.from_pretrained('facebook/dinov2-small')
+                cls._instance = AutoModel.from_pretrained('facebook/dinov2-small').to(device)
+            except Exception as e:
+                print(f"[DEBUG] DINOv2 online load failed: {e}. Retrying with local_files_only=True...")
+                try:
+                    cls._processor = AutoImageProcessor.from_pretrained('facebook/dinov2-small', local_files_only=True)
+                    cls._instance = AutoModel.from_pretrained('facebook/dinov2-small', local_files_only=True).to(device)
+                except Exception as inner_e:
+                    print(f"[DEBUG] DINOv2 local cache load failed: {inner_e}")
+                    raise inner_e
         return cls._instance, cls._processor
 
 

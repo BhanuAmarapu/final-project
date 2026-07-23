@@ -216,9 +216,8 @@ def upload_file():
             temp_path = os.path.join(app.config['UPLOAD_TEMP'], filename)
             file.save(temp_path)
             
-            # Check if file is audio or video (extension-based check)
-            SUPPORTED_AUDIO_EXTENSIONS = {'mp3', 'wav', 'aac', 'flac', 'm4a'}
-            SUPPORTED_VIDEO_EXTENSIONS = {'mp4', 'avi', 'mov', 'mkv', 'webm', 'wmv', 'flv', 'ogg'}
+            SUPPORTED_AUDIO_EXTENSIONS = {'mp3', 'wav', 'aac', 'flac', 'm4a', 'mpeg', 'mpg', 'ogg', 'opus', 'amr', 'wma', 'mpga', 'mp2'}
+            SUPPORTED_VIDEO_EXTENSIONS = {'mp4', 'avi', 'mov', 'mkv', 'webm', 'wmv', 'flv', 'ogg', 'mpeg', 'mpg'}
             file_ext = filename.split('.')[-1].lower() if '.' in filename else ''
             
             if file_ext in SUPPORTED_AUDIO_EXTENSIONS:
@@ -275,19 +274,21 @@ def upload_file():
                     
                     def run_async_pipeline(rec_id, t_path, orig_name, s3_name):
                         try:
-                            # Extract 60-second audio snippet for faster transcription and duplicate detection
+                            # Extract audio snippet for faster transcription and duplicate detection (local-first / PCM WAV for speed)
                             import subprocess
                             import uuid
-                            snippet_filename = f"snippet_{uuid.uuid4().hex}.mp3"
+                            snippet_filename = f"snippet_{uuid.uuid4().hex}.wav"
                             temp_audio_snippet = os.path.join(app.config['UPLOAD_TEMP'], snippet_filename)
                             
+                            snippet_duration = str(Config.AUDIO_SNIPPET_DURATION)
                             cmd = [
-                                "ffmpeg", "-y", "-i", t_path, 
-                                "-ss", "0", "-t", "60", 
-                                "-acodec", "libmp3lame", "-ar", "16000", "-ac", "1", 
+                                "ffmpeg", "-y", 
+                                "-ss", "0", "-t", snippet_duration, 
+                                "-i", t_path, 
+                                "-acodec", "pcm_s16le", "-ar", "16000", "-ac", "1", 
                                 temp_audio_snippet
                             ]
-                            print(f"[AsyncAudio] Extracting 60s snippet using command: {' '.join(cmd)}")
+                            print(f"[AsyncAudio] Extracting {snippet_duration}s WAV snippet using command: {' '.join(cmd)}")
                             process = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
                             
                             # Transcribe the snippet if it was successfully created, fallback to full audio if not
@@ -458,21 +459,23 @@ def upload_file():
                     def run_video_async_pipeline(rec_id, t_path, orig_name, s3_name):
                         temp_extracted_audio = None
                         try:
-                            # 1. Extract audio track using FFmpeg (directly from local server cached file)
+                            # 1. Extract audio track using FFmpeg (directly from local server cached file, PCM WAV for speed)
                             import subprocess
                             import uuid
-                            audio_filename = f"extracted_{uuid.uuid4().hex}.mp3"
+                            audio_filename = f"extracted_{uuid.uuid4().hex}.wav"
                             temp_extracted_audio = os.path.join(app.config['UPLOAD_TEMP'], audio_filename)
                             
-                            # Limit audio extraction to first 60 seconds for speed
+                            # Limit audio extraction for speed
+                            snippet_duration = str(Config.AUDIO_SNIPPET_DURATION)
                             cmd = [
-                                "ffmpeg", "-y", "-i", t_path, 
-                                "-vn", "-acodec", "libmp3lame", "-ar", "16000", "-ac", "1", 
-                                "-ss", "0", "-t", "60",
+                                "ffmpeg", "-y", 
+                                "-ss", "0", "-t", snippet_duration, 
+                                "-i", t_path, 
+                                "-vn", "-acodec", "pcm_s16le", "-ar", "16000", "-ac", "1", 
                                 temp_extracted_audio
                             ]
                             
-                            print(f"[AsyncVideo] Extracting audio track using command: {' '.join(cmd)}")
+                            print(f"[AsyncVideo] Extracting {snippet_duration}s audio track WAV using command: {' '.join(cmd)}")
                             process = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
                             
                             transcript = "No audio track detected or extraction failed."
@@ -968,7 +971,7 @@ def api_link_media():
         
         # Find the existing record to copy metadata from
         existing = conn.execute(f"""
-            SELECT transcript, embedding, language, duration, s3_object_key, similarity_score 
+            SELECT original_filename, transcript, embedding, language, duration, s3_object_key, similarity_score, file_size 
             FROM {table} 
             WHERE file_hash = ? AND status = 'completed'
             LIMIT 1
@@ -984,8 +987,8 @@ def api_link_media():
         if media_type == 'audio':
             conn.execute("""
                 INSERT INTO audio_records 
-                (user_id, original_filename, uuid_filename, transcript, embedding, language, duration, s3_object_key, similarity_score, status, file_hash)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                (user_id, original_filename, uuid_filename, transcript, embedding, language, duration, s3_object_key, similarity_score, status, file_hash, file_size, matched_file, matched_transcript)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """, (
                 current_user.id,
                 original_filename,
@@ -995,15 +998,18 @@ def api_link_media():
                 existing["language"],
                 existing["duration"],
                 existing["s3_object_key"],  # pointing to existing S3 file
-                existing["similarity_score"],
+                1.0,  # 100% similarity for identical duplicate
                 "completed",
-                media_hash
+                media_hash,
+                existing["file_size"] or 0,
+                existing["original_filename"],
+                existing["transcript"]
             ))
         else: # video
             conn.execute("""
                 INSERT INTO video_records 
-                (user_id, original_filename, uuid_filename, s3_object_key, transcript, embedding, language, duration, similarity_score, status, file_hash)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                (user_id, original_filename, uuid_filename, s3_object_key, transcript, embedding, language, duration, similarity_score, status, file_hash, file_size, matched_file, matched_transcript)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """, (
                 current_user.id,
                 original_filename,
@@ -1013,9 +1019,12 @@ def api_link_media():
                 existing["embedding"],
                 existing["language"],
                 existing["duration"],
-                existing["similarity_score"],
+                1.0,  # 100% similarity for identical duplicate
                 "completed",
-                media_hash
+                media_hash,
+                existing["file_size"] or 0,
+                existing["original_filename"],
+                existing["transcript"]
             ))
             
         conn.commit()

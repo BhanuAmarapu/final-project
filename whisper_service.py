@@ -54,12 +54,32 @@ class WhisperService:
             model_name = os.getenv("WHISPER_MODEL", "openai/whisper-tiny")
             print(f"[WhisperService] Loading Hugging Face Whisper model '{model_name}' on {device_str}...")
             
-            self.pipe = pipeline(
-                "automatic-speech-recognition",
-                model=model_name,
-                chunk_length_s=30,
-                device=device
-            )
+            try:
+                # Try loading locally first for speed and offline robustness by setting HF_HUB_OFFLINE=1
+                print(f"[WhisperService] Attempting local-first load for model '{model_name}'...")
+                os.environ["HF_HUB_OFFLINE"] = "1"
+                self.pipe = pipeline(
+                    "automatic-speech-recognition",
+                    model=model_name,
+                    chunk_length_s=30,
+                    device=device
+                )
+            except Exception as local_err:
+                print(f"[WhisperService] Local Whisper model load failed: {local_err}. Trying online loading...")
+                os.environ["HF_HUB_OFFLINE"] = "0"
+                try:
+                    self.pipe = pipeline(
+                        "automatic-speech-recognition",
+                        model=model_name,
+                        chunk_length_s=30,
+                        device=device
+                    )
+                except Exception as e:
+                    print(f"[WhisperService] Online Whisper loading failed: {e}")
+                    raise e
+            finally:
+                # Clean up/reset HF_HUB_OFFLINE
+                os.environ.pop("HF_HUB_OFFLINE", None)
             print(f"[WhisperService] Whisper model '{model_name}' pipeline loaded successfully.")
         return self.pipe
  

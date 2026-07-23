@@ -159,14 +159,14 @@ document.addEventListener('DOMContentLoaded', function() {
             
             const filename = file.name;
             const ext = filename.split('.').pop().toLowerCase();
-            const supportedAudio = ['mp3', 'wav', 'aac', 'flac', 'm4a'];
-            const supportedVideo = ['mp4', 'avi', 'mov', 'mkv', 'webm', 'wmv', 'flv', 'ogg'];
+            const supportedAudio = ['mp3', 'wav', 'aac', 'flac', 'm4a', 'mpeg', 'mpg', 'ogg', 'opus', 'amr', 'wma', 'mpga', 'mp2'];
+            const supportedVideo = ['mp4', 'avi', 'mov', 'mkv', 'webm', 'wmv', 'flv', 'ogg', 'mpeg', 'mpg'];
             
             if (supportedAudio.includes(ext) || supportedVideo.includes(ext)) {
                 // Intercept for audio and video files
                 event.preventDefault();
                 
-                const isVideo = supportedVideo.includes(ext);
+                const isVideo = !supportedAudio.includes(ext) && supportedVideo.includes(ext);
                 const mediaType = isVideo ? 'video' : 'audio';
                 
                 // Show processing loader
@@ -297,10 +297,12 @@ document.addEventListener('DOMContentLoaded', function() {
                 })
                 .then(data => {
                     if (data.status === 'processing') {
-                        const mediaId = isVideo ? data.video_id : data.audio_id;
-                        const statusUrl = isVideo ? '/video/status/' + mediaId : '/audio/status/' + mediaId;
-                        const confirmUrl = isVideo ? '/video/confirm_store/' + mediaId : '/audio/confirm_store/' + mediaId;
-                        const deleteUrl = isVideo ? '/video/delete/' + mediaId : '/audio/delete/' + mediaId;
+                        const isActualVideo = data.video_id !== undefined;
+                        const mediaId = isActualVideo ? data.video_id : data.audio_id;
+                        const statusUrl = isActualVideo ? '/video/status/' + mediaId : '/audio/status/' + mediaId;
+                        const confirmUrl = isActualVideo ? '/video/confirm_store/' + mediaId : '/audio/confirm_store/' + mediaId;
+                        const deleteUrl = isActualVideo ? '/video/delete/' + mediaId : '/audio/delete/' + mediaId;
+                        isVideo = isActualVideo;
                         
                         const pollInterval = setInterval(function() {
                             fetch(statusUrl)
@@ -390,9 +392,41 @@ document.addEventListener('DOMContentLoaded', function() {
                                     });
                                 } else if (statusData.status === 'completed') {
                                     clearInterval(pollInterval);
-                                    loader.classList.add('d-none');
-                                    loader.classList.remove('d-flex');
-                                    window.location.href = '/dashboard';
+                                    
+                                    // Update Loader to Success Screen with Similarity Score
+                                    const spinner = loader.querySelector('.spinner-border');
+                                    if (spinner) {
+                                        spinner.outerHTML = '<div class="mb-3 text-success"><i class="bi bi-check-circle-fill" style="font-size: 4.5rem; color: #198754;"></i></div>';
+                                    }
+                                    
+                                    loaderHeader.textContent = "Upload & Analysis Complete!";
+                                    const similarityPercent = (statusData.similarity !== null && statusData.similarity !== undefined) ? (statusData.similarity * 100).toFixed(2) + "%" : "0.00%";
+                                    loaderText.innerHTML = `
+                                        <div class="card bg-dark border-secondary p-3 mt-3 text-start shadow-sm mx-auto" style="max-width: 400px; color: #e9ecef; border-radius: 12px;">
+                                            <div class="d-flex justify-content-between mb-2">
+                                                <span class="text-white">Highest Semantic Similarity:</span>
+                                                <strong class="text-success">${similarityPercent}</strong>
+                                            </div>
+                                            <div class="small text-muted mb-3 text-center">
+                                                File processed successfully with no conflicts.
+                                            </div>
+                                            <button id="btnProceedDashboard" class="btn btn-success w-100 rounded-pill fw-bold text-white py-2">
+                                                Proceed to Dashboard
+                                            </button>
+                                        </div>
+                                    `;
+                                    
+                                    const proceedBtn = document.getElementById('btnProceedDashboard');
+                                    let redirectTimeout = setTimeout(() => {
+                                        window.location.href = '/dashboard';
+                                    }, 4000);
+                                    
+                                    if (proceedBtn) {
+                                        proceedBtn.addEventListener('click', () => {
+                                            clearTimeout(redirectTimeout);
+                                            window.location.href = '/dashboard';
+                                        });
+                                    }
                                 } else if (statusData.status === 'failed') {
                                     clearInterval(pollInterval);
                                     loader.classList.add('d-none');

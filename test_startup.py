@@ -42,15 +42,12 @@ except Exception as e:
 
 print(f"\n[4/5] Database Connection Check")
 try:
-    from config import Config
-    print(f"  Database path: {Config.DATABASE}")
-    
-    import sqlite3
-    conn = sqlite3.connect(Config.DATABASE)
-    conn.row_factory = sqlite3.Row
+    from app import get_db_connection
+    conn = get_db_connection()
     
     # Test users table
-    result = conn.execute("SELECT COUNT(*) FROM users").fetchone()[0]
+    row = conn.execute("SELECT COUNT(*) as count FROM users").fetchone()
+    result = row['count'] if row else 0
     print(f"  [OK] Users table accessible ({result} users)")
     
     # Test a user query (same as app.py does)

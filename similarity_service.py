@@ -38,27 +38,36 @@ class SimilarityService:
         if table_name not in ["audio_records", "video_records"]:
             raise ValueError("Invalid target similarity table name")
   
-        # Connect to DB and fetch all stored records
+        # Connect to DB and fetch all stored records from both tables (audio and video) for cross-media similarity
         conn = get_mysql_connection()
+        stored_records = []
         try:
+            # 1. Fetch from the current target table (exclude current ID if provided)
             if exclude_id is not None:
                 cursor = conn.execute(
-                    f"SELECT id, original_filename, transcript, embedding, language, duration, s3_object_key FROM {table_name} WHERE id != ?",
+                    f"SELECT id, original_filename, transcript, embedding, language, duration, s3_object_key FROM {table_name} WHERE id != ? AND status = 'completed'",
                     (exclude_id,)
                 )
             else:
                 cursor = conn.execute(
-                    f"SELECT id, original_filename, transcript, embedding, language, duration, s3_object_key FROM {table_name}"
+                    f"SELECT id, original_filename, transcript, embedding, language, duration, s3_object_key FROM {table_name} WHERE status = 'completed'"
                 )
-            stored_records = cursor.fetchall()
+            stored_records.extend(cursor.fetchall())
+            
+            # 2. Fetch from the other table (no exclude_id needed as IDs do not conflict across tables)
+            other_table = "video_records" if table_name == "audio_records" else "audio_records"
+            cursor = conn.execute(
+                f"SELECT id, original_filename, transcript, embedding, language, duration, s3_object_key FROM {other_table} WHERE status = 'completed'"
+            )
+            stored_records.extend(cursor.fetchall())
+            
         except Exception as e:
             print(f"[SimilarityService] DB Error: {e}")
-            stored_records = []
         finally:
             conn.close()
  
         if not stored_records:
-            log_action("Highest Similarity Found", f"No existing {table_name} records to compare against.")
+            log_action("Highest Similarity Found", f"No existing records in {table_name} or {other_table} to compare against.")
             return {"similarity": 0.0, "matched_record": None}
 
         highest_similarity = 0.0

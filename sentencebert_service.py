@@ -16,7 +16,17 @@ class SentenceBERTService:
             model_name = os.getenv('SENTENCE_BERT_MODEL', 'all-MiniLM-L6-v2')
             device = "cuda" if torch.cuda.is_available() else "cpu"
             print(f"[SentenceBERTService] Loading model '{model_name}' on {device}...")
-            self.model = SentenceTransformer(model_name, device=device)
+            try:
+                # Try loading locally first for speed and offline robustness
+                print(f"[SentenceBERTService] Attempting local-first load for model '{model_name}'...")
+                self.model = SentenceTransformer(model_name, device=device, local_files_only=True)
+            except Exception as local_err:
+                print(f"[SentenceBERTService] Local SentenceTransformer load failed: {local_err}. Trying online loading...")
+                try:
+                    self.model = SentenceTransformer(model_name, device=device)
+                except Exception as e:
+                    print(f"[SentenceBERTService] Online SentenceTransformer load failed: {e}")
+                    raise e
             print("[SentenceBERTService] Model loaded successfully.")
         return self.model
 
