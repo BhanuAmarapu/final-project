@@ -263,23 +263,23 @@ moderator = ContentModerator(threshold=0.35)  # 35% similarity
 - `0.35` (35%) - **Default** (balanced)
 - `0.40` (40%) - Lenient mode
 
-## 🎙️ Audio & Video Processing Pipelines (AWS S3 Optimized)
+## 🎙️ Audio & Video Processing Pipelines (AWS S3 & Speed Optimized)
 
-The system features advanced pipelines for secure, optimized storage of audio and video files directly integrated with **AWS S3**.
+The system features advanced pipelines for secure, optimized storage of audio and video files directly integrated with **AWS S3** and optimized for high performance.
 
-### 1. Asynchronous Audio Deduplication & Polling
-- **Immediate Cloud Sync**: When an audio file is uploaded, the background thread performs S3 uploading **first** as its primary action. This ensures the file is backed up to S3 within seconds.
-- **Non-Blocking AJAX Polling**: To prevent HTTP request timeouts during long audio file evaluations, the server immediately returns a success status with a process ID. The frontend dynamically polls `/audio/status/<id>` every 2 seconds via AJAX.
-- **CPU Performance Tuning**:
-  - **Thread Optimization**: Limits PyTorch CPU threading (`torch.set_num_threads(4)`) to eliminate core scheduling contention overhead.
-  - **Pipeline Batching**: Whisper segment chunking is batched (`batch_size=8`) to transcribing chunks concurrently.
-  - **Lighter Vector Models**: Generates embeddings using the fast and lightweight Sentence-BERT model `'all-MiniLM-L6-v2'`.
+### 1. Asynchronous Audio & Video Deduplication & Polling
+- **Immediate Cloud Sync**: When an audio or video file is uploaded, the background thread performs S3 uploading **first** as its primary action. This ensures the file is backed up to S3 within seconds.
+- **Non-Blocking AJAX Polling**: To prevent HTTP request timeouts during long evaluations, the server immediately returns a success status with a process ID. The frontend dynamically polls `/audio/status/<id>` or `/video/status/<id>` every 2 seconds via AJAX.
+- **Offline & Speed Optimizations**:
+  - **Local-First Model Loading**: Attempts to load Whisper and Sentence-BERT models locally (`local_files_only=True` and `HF_HUB_OFFLINE=1`) before attempting online Hugging Face checks. This avoids 10-30s DNS and network lookup timeouts on startup and background worker execution.
+  - **High-Speed Snippet Processing**: Extracts a 30-second snippet (configurable via `AUDIO_SNIPPET_DURATION`) in raw **PCM WAV** format (`pcm_s16le`, 16kHz mono) instead of `.mp3`. This avoids compression processing overhead.
+  - **Direct Similarity Feedback**: Standard upload progress screens display the calculated similarity score on completion (e.g. `Highest Semantic Similarity: 12.45%`) with a checkmark instead of immediately redirecting, giving clear feedback.
 - **Similarity Confirmation Modal**: If similarity matching $\ge 60\%$, polling stops, the loader is cleared, and an interactive Bootstrap modal popup appears containing matching metadata (original filename, similarity score, and transcript snippet). The user selects:
   - **Store anyway**: Keeps the file in S3 and completes database records.
   - **Cancel upload**: Purges S3 storage object and database rows.
 
 ### 2. Dedicated Video Pipeline
-- **Bypassed AI Pipeline**: Video files (e.g. `.mp4`, `.mov`, `.avi`, `.webm`) bypass Whisper transcription and Sentence-BERT embedding, and upload directly to AWS S3.
+- **AI Content Matching**: Extracts the audio track from the video file using FFmpeg and runs Whisper transcription/Sentence-BERT embedding generation to run cross-modal semantic similarity checks.
 - **Dedicated Videos Section**: Registered video uploads are displayed on a dedicated **Videos** tab on the main dashboard.
 - **Inline Streaming**: Both audio and video tabs support the **Open** action, which streams decrypted/raw media files inline using headers like `Content-Disposition: inline` so they play directly in your web browser.
 
